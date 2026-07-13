@@ -20,4 +20,4 @@ POST /api/review  (one SSE stream, server orchestrates)
 
 ## Why it exists
 
-Projects [1](https://github.com/Elmessiry/AI-Doc-Assistant) and [2](https://github.com/Elmessiry/github-dev-dashboard) prove I can build. This one is about designing an AI *system*: routing work between agents, handling the case where one of them fails, and — the part most AI demos skip — having a way to know when the model is wrong.
+Projects [1](https://github.com/Elmessiry/AI-Doc-Assistant) and [2](https://github.com/Elmessiry/github-dev-dashboard) prove I can build. This one is about designing an AI _system_: routing work between agents, handling the case where one of them fails, and — the part most AI demos skip — having a way to know when the model is wrong.
