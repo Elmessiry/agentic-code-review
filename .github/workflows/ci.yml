@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  quality:
+    name: Lint & typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run format:check
+      # The build runs without OPENROUTER_API_KEY on purpose: the key is read
+      # inside the request handler, not at module load, so a missing key must never
+      # be able to break a build. If this step starts needing a secret, something
+      # has leaked into the wrong scope.
+      - run: npm run build

@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+/* Dark only, on purpose. This is a developer tool that shows a running pipeline
+   and syntax-highlighted code; a light theme would need a second set of node
+   states and a second editor theme to look deliberate rather than merely
+   supported. One theme done properly beats two done adequately. */
+@theme {
+  --color-canvas: #0d1117;
+  --color-surface: #151b23;
+  --color-border: #2a313c;
+  --color-ink: #e6edf3;
+  --color-muted: #9198a1;
+  --color-accent: #7c8cff;
+
+  /* Severity. Also the node states in the pipeline graph, which is why they live
+     here rather than inline: they have to agree across the two views. */
+  --color-high: #f85149;
+  --color-medium: #d29922;
+  --color-low: #3fb950;
+}
+
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+}
+
+/* CodeMirror sets its own background; this keeps it flush with the surface it
+   sits on instead of floating a slightly-wrong dark grey inside our panel. */
+.cm-editor {
+  background: transparent !important;
+}
+.cm-gutters {
+  background: transparent !important;
+  border-right: 1px solid var(--color-border) !important;
+}
