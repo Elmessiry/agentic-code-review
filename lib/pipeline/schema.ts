@@ -87,14 +87,31 @@ export const PLANNER_TOOL = {
 };
 
 // The planner is a language model, so it can return a specialist that does not
-// exist or repeat one twice. Filter to the known set before anything downstream
-// trusts it as a key.
-export function coerceSpecialists(value: unknown): Specialist[] {
-  if (!Array.isArray(value)) return [];
+// exist, capitalise one, or repeat it twice. Filter to the known set before
+// anything downstream trusts it as a key.
+//
+// Whatever gets discarded is RETURNED, not swallowed. A silent filter here would
+// be the nastiest bug in the pipeline: the planner says "security" with a capital
+// S, the filter drops it, and the UI renders a confident, well-reasoned decision
+// to skip Security — reasoning text and all — that the planner never actually made.
+// A skip that is really a parse failure must not be able to impersonate a judgement
+// call.
+export function coerceSpecialists(value: unknown): {
+  agents: Specialist[];
+  dropped: unknown[];
+} {
+  if (!Array.isArray(value)) {
+    return { agents: [], dropped: value === undefined ? [] : [value] };
+  }
+
   const known = new Set<string>(SPECIALISTS);
-  return [
-    ...new Set(
-      value.filter((v): v is Specialist => typeof v === "string" && known.has(v)),
-    ),
-  ];
+  const agents = new Set<Specialist>();
+  const dropped: unknown[] = [];
+
+  for (const v of value) {
+    if (typeof v === "string" && known.has(v)) agents.add(v as Specialist);
+    else dropped.push(v);
+  }
+
+  return { agents: [...agents], dropped };
 }

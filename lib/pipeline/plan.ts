@@ -30,7 +30,20 @@ export async function plan(code: string): Promise<{ plan: Plan; usage: Usage }> 
     tool: PLANNER_TOOL,
   });
 
-  const chosen = coerceSpecialists(args.relevant_agents);
+  const { agents: chosen, dropped } = coerceSpecialists(args.relevant_agents);
+
+  if (dropped.length > 0) {
+    // The planner emitted something outside the schema. The tool call constrains
+    // relevant_agents with an enum, but that is a hint the model can miss — and the
+    // planner deliberately runs on the weakest model in the registry, which is
+    // exactly where a miss is likeliest. Log it loudly: a dropped value is the
+    // difference between a deliberate skip and a parse failure wearing its clothes.
+    console.warn(
+      "[plan] planner returned specialists outside the schema",
+      JSON.stringify({ dropped, kept: chosen }),
+    );
+  }
+
   const forcedNames = forced.map((f) => f.specialist);
 
   // The union, in a stable order. Sorting by SPECIALISTS rather than by whichever
