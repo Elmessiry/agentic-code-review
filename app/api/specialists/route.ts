@@ -12,15 +12,27 @@ import type { ReviewResponse } from "@/lib/pipeline/schema";
 // are three surfaces to rate-limit and cap, for no benefit once the client stops
 // orchestrating.
 
+// A retried pipeline can legitimately run for minutes: each model call is allowed up
+// to three attempts of up to 45s. The platform default (as low as 10s) would kill the
+// function mid-flight — after the upstream calls were already billed — and hand the
+// user a raw 504 instead of the review they paid for. Requires Fluid Compute on the
+// Hobby plan; lower to 60 if deploying without it.
+export const maxDuration = 300;
+
 export async function POST(request: Request): Promise<Response> {
   const input = await readCode(request);
   if (!input.ok) return input.response;
 
   try {
+    // Resolved BEFORE any model call on purpose: modelFor throws by design on an
+    // unknown env override, and if that throw happened during payload construction it
+    // would land after the planner had already been billed — discarding paid-for work
+    // over a typo that was knowable up front. Fail fast while failing is still free.
+    const spec = modelFor("specialist");
+
     const { plan: decision, usage: planUsage } = await plan(input.code);
     const fan = await fanOut(decision.agents, input.code);
 
-    const spec = modelFor("specialist");
     const prefixTokens = approxTokens(input.code);
 
     // Annotated, so that dropping a field the UI reads is a build error.
