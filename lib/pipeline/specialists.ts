@@ -1,6 +1,7 @@
 import {
   callTool,
   OpenRouterError,
+  ZERO_USAGE,
   type ChatMessage,
   type Usage,
 } from "@/lib/openrouter";
@@ -75,10 +76,11 @@ async function runOne(
   code: string,
   explicitCache: boolean,
   events: FanOutEvents,
+  signal?: AbortSignal,
 ): Promise<SpecialistOutcome> {
   events.onStart?.(specialist);
 
-  const outcome = await attempt(specialist, code, explicitCache);
+  const outcome = await attempt(specialist, code, explicitCache, signal);
   events.onOutcome?.(outcome);
 
   return outcome;
@@ -88,12 +90,14 @@ async function attempt(
   specialist: Specialist,
   code: string,
   explicitCache: boolean,
+  signal?: AbortSignal,
 ): Promise<SpecialistOutcome> {
   try {
     const { args, usage } = await callTool<{ findings: unknown }>({
       role: "specialist",
       messages: messagesFor(specialist, code, explicitCache),
       tool: FINDINGS_TOOL,
+      signal,
     });
 
     const { findings, dropped } = dropImpossibleLines(
@@ -116,13 +120,9 @@ async function attempt(
         // a bare fact.
         error: "This specialist could not be reached.",
       },
-      usage: error instanceof OpenRouterError ? error.usage : zeroUsage(),
+      usage: error instanceof OpenRouterError ? error.usage : { ...ZERO_USAGE },
     };
   }
-}
-
-function zeroUsage(): Usage {
-  return { costUsd: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
 }
 
 // Runs the selected specialists and returns whatever came back — results, failures,
@@ -154,6 +154,7 @@ export async function fanOut(
   specialists: Specialist[],
   code: string,
   events: FanOutEvents = {},
+  signal?: AbortSignal,
 ): Promise<FanOut> {
   const outcomes: SpecialistOutcome[] = [];
 
@@ -168,7 +169,7 @@ export async function fanOut(
     if (explicitCache) {
       while (remaining.length > 1) {
         const [warmer, ...rest] = remaining;
-        const outcome = await runOne(warmer, code, explicitCache, events);
+        const outcome = await runOne(warmer, code, explicitCache, events, signal);
         outcomes.push(outcome);
         remaining = rest;
         if (outcome.ok) break;
@@ -177,7 +178,7 @@ export async function fanOut(
 
     outcomes.push(
       ...(await Promise.all(
-        remaining.map((s) => runOne(s, code, explicitCache, events)),
+        remaining.map((s) => runOne(s, code, explicitCache, events, signal)),
       )),
     );
   }

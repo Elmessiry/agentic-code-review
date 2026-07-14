@@ -32,6 +32,7 @@ export async function synthesize(
   results: { specialist: Specialist; findings: Finding[] }[],
   failed: Specialist[],
   onDelta: (text: string) => void,
+  signal?: AbortSignal,
 ): Promise<{ synthesis: Synthesis; usage: Usage }> {
   const { args, usage } = await streamTool<{
     summary?: unknown;
@@ -45,6 +46,7 @@ export async function synthesize(
       // The field whose prose is decoded out of the still-arriving JSON and forwarded
       // to the browser. It is first in SYNTHESIS_TOOL's schema for exactly this reason.
       streamField: "summary",
+      signal,
     },
     onDelta,
   );
