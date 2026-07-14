@@ -9,14 +9,32 @@ import { modelFor, type Role } from "@/lib/models";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
-// No single model call should take this long. Without it, a stalled upstream
-// holds a serverless function open until the platform kills it — we pay for the
-// wall time and the user watches a spinner that will never resolve.
-const TIMEOUT_MS = 30_000;
+// No single model call should take this long. Without it, a stalled upstream holds a
+// serverless function open until the platform kills it — we pay for the wall time and
+// the user watches a spinner that will never resolve.
+//
+// 45s, not 30s: a reasoning model given a dense rubric and a file to review genuinely
+// took longer than thirty seconds, and timing it out was not protecting anyone from
+// anything. The limit exists to catch a hang, not to hurry a model that is working.
+const TIMEOUT_MS = 45_000;
+
+// A cache breakpoint. Everything from the start of the request up to and including
+// the block carrying this is cached; the next request that opens with a byte-identical
+// prefix reads it back at roughly a tenth of the price.
+//
+// Only the explicit-cache vendors want this (Anthropic). The automatic-cache vendors
+// (OpenAI, DeepSeek) cache the common prefix on their own and would reject or ignore
+// the field, which is why lib/models.ts carries a `caching` mode and this is attached
+// conditionally rather than always.
+export type ContentBlock = {
+  type: "text";
+  text: string;
+  cache_control?: { type: "ephemeral" };
+};
 
 export type ChatMessage = {
   role: "system" | "user" | "assistant";
-  content: string;
+  content: string | ContentBlock[];
 };
 
 // What a call cost and how much of it was served from cache. OpenRouter reports
@@ -117,6 +135,40 @@ export function chatCompletion({
   });
 }
 
+// Transient upstream failures. A provider rate-limiting us or briefly falling over
+// is not a reason to fail a review the user is watching — but a 400 (our request is
+// malformed) will fail identically every time, so retrying it just burns latency.
+const RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
+const MAX_ATTEMPTS = 3;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Retries with exponential backoff and jitter. The jitter matters more than it looks:
+// four specialists fan out simultaneously, so they hit any rate limit simultaneously,
+// and a fixed backoff would have all four retry in lockstep and collide again.
+async function withRetry(opts: CallOptions): Promise<Response> {
+  let last: Response | Error | null = null;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await chatCompletion(opts);
+      if (res.ok || !RETRYABLE.has(res.status)) return res;
+      last = res;
+    } catch (error) {
+      // A network failure or an aborted timeout. Both are worth one more try.
+      if (error instanceof Error && error.name === "AbortError") throw error;
+      last = error as Error;
+    }
+
+    if (attempt < MAX_ATTEMPTS) {
+      await sleep(2 ** attempt * 250 + Math.random() * 250);
+    }
+  }
+
+  if (last instanceof Error) throw last;
+  throw new OpenRouterError(last!.status, await last!.text());
+}
+
 // Forces a tool call and returns its arguments, already parsed.
 //
 // The model cannot decline: tool_choice names the function, so a well-behaved
@@ -127,33 +179,47 @@ export async function callTool<T>(opts: CallOptions & { tool: Tool }): Promise<{
   args: T;
   usage: Usage;
 }> {
-  const res = await chatCompletion(opts);
+  const name = opts.tool.function.name;
+  let last: Error | null = null;
 
-  if (!res.ok) {
-    throw new OpenRouterError(res.status, await res.text());
+  // Forcing a tool call is not a guarantee, only a very strong hint, and this was
+  // measured rather than assumed: a reasoning model answered with its chain of thought
+  // and no tool call at all, despite tool_choice naming the function. It is a transient
+  // model failure of exactly the kind a retry fixes — so the parse lives INSIDE the
+  // retry loop rather than after it. Retrying only on the HTTP status would have left
+  // this one failing permanently on a 200.
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const res = await withRetry(opts);
+
+    if (!res.ok) {
+      throw new OpenRouterError(res.status, await res.text());
+    }
+
+    const json = await res.json();
+    const call = json?.choices?.[0]?.message?.tool_calls?.[0];
+
+    if (!call) {
+      last = new OpenRouterError(
+        502,
+        `model answered without calling ${name}: ${JSON.stringify(json?.choices?.[0]?.message ?? json)}`,
+      );
+    } else {
+      try {
+        // `arguments` is a JSON *string* the model generated token by token, so a model
+        // that ran out of output budget mid-object hands back a truncated one.
+        return { args: JSON.parse(call.function.arguments) as T, usage: readUsage(json) };
+      } catch {
+        last = new OpenRouterError(
+          502,
+          `${name} returned unparseable arguments: ${call.function.arguments}`,
+        );
+      }
+    }
+
+    if (attempt < MAX_ATTEMPTS) await sleep(2 ** attempt * 250 + Math.random() * 250);
   }
 
-  const json = await res.json();
-  const call = json?.choices?.[0]?.message?.tool_calls?.[0];
-
-  if (!call) {
-    throw new OpenRouterError(
-      502,
-      `model answered without calling ${opts.tool.function.name}: ${JSON.stringify(json?.choices?.[0]?.message ?? json)}`,
-    );
-  }
-
-  let args: T;
-  try {
-    args = JSON.parse(call.function.arguments);
-  } catch {
-    throw new OpenRouterError(
-      502,
-      `${opts.tool.function.name} returned unparseable arguments: ${call.function.arguments}`,
-    );
-  }
-
-  return { args, usage: readUsage(json) };
+  throw last!;
 }
 
 // Reads a non-streaming completion: the assistant's text plus what it cost.
