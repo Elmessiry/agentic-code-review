@@ -10,6 +10,10 @@ import { readCode } from "@/lib/guards/input-cap";
 // that each call a model are three surfaces to rate-limit and cap, for no benefit
 // once the client stops orchestrating.
 
+// A retried planner call can run past the platform's default function timeout (as low
+// as 10s); see app/api/specialists/route.ts for the reasoning behind the number.
+export const maxDuration = 300;
+
 export async function POST(request: Request): Promise<Response> {
   const input = await readCode(request);
   if (!input.ok) return input.response;

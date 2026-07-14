@@ -8,6 +8,10 @@ import { readCode } from "@/lib/guards/input-cap";
 // whether four specialists and a synthesizer actually beat one good prompt — and
 // that stays answerable only while the one good prompt is still here.
 
+// A retried call can run past the platform's default function timeout (as low as
+// 10s); see app/api/specialists/route.ts for the reasoning behind the number.
+export const maxDuration = 300;
+
 function json(body: unknown, status: number): Response {
   return Response.json(body, {
     status,

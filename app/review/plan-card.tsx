@@ -1,6 +1,10 @@
 "use client";
 
-import { SPECIALIST_LABELS, type Plan, type Specialist } from "@/lib/pipeline/schema";
+import {
+  SPECIALIST_LABELS,
+  type ReviewResponse,
+  type Specialist,
+} from "@/lib/pipeline/schema";
 
 // The planner's decision, shown before any specialist runs.
 //
@@ -10,10 +14,8 @@ import { SPECIALIST_LABELS, type Plan, type Specialist } from "@/lib/pipeline/sc
 // them money or lost them a vulnerability. So it shows what it skipped, why, and —
 // when the tripwire overruled it — who won.
 
-export type PlanResult = Plan & {
-  overrides: Record<string, string>;
-  costUsd: number;
-};
+// One source of truth for the payload shape: lib/pipeline/schema.ts.
+export type PlanResult = ReviewResponse["plan"];
 
 function Pill({
   children,

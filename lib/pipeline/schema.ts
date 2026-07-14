@@ -32,7 +32,13 @@ export const SPECIALIST_BRIEFS: Record<Specialist, string> = {
     "Whether the code is testable and what a test would need to assert. Missing edge cases, untestable coupling, absent error-path coverage.",
 };
 
-export type Severity = "high" | "medium" | "low";
+// The single source for the severity scale. The type, the tool schema's enum, and
+// the runtime validation in line-refs.ts all derive from this array — three sites
+// that once spelled the literals independently, where adding a severity to two of
+// them would have made every finding at the new level silently vanish in the third.
+export const SEVERITIES = ["high", "medium", "low"] as const;
+
+export type Severity = (typeof SEVERITIES)[number];
 
 export type Finding = {
   specialist: Specialist;
@@ -81,6 +87,93 @@ export const PLANNER_TOOL = {
         },
       },
       required: ["relevant_agents", "reasoning"],
+      additionalProperties: false,
+    },
+  },
+};
+
+// What the review endpoint sends back.
+//
+// Declared here, and imported by BOTH the route and the component that renders it, so
+// the two cannot drift. They already did once: the route moved the planner's cost into
+// a totals object, the card went on reading plan.costUsd, and the page died on
+// undefined.toFixed(). Nothing caught it, because `await res.json()` is `any` and an
+// unchecked cast into a typed shape is a lie the compiler is happy to believe.
+//
+// The route annotates its payload with this type, so a field the UI needs and the
+// server stopped sending is now a build error rather than a white screen.
+export type ReviewResponse = {
+  plan: Plan & {
+    overrides: Record<string, string>;
+    costUsd: number;
+  };
+  results: {
+    specialist: Specialist;
+    findings: Finding[];
+    droppedLineRefs: number;
+  }[];
+  failures: { specialist: Specialist; error: string }[];
+  cost: {
+    planUsd: number;
+    specialistsUsd: number;
+    totalUsd: number;
+  };
+  cache: {
+    mode: string;
+    model: string;
+    prefixTokens: number;
+    minCacheTokens: number;
+    clearsFloor: boolean;
+    cachedTokens: number;
+    inputTokens: number;
+    hitRate: number;
+  };
+};
+
+// The tool every specialist is forced to call. One schema for all four, so the
+// synthesizer downstream receives one shape regardless of who produced it.
+export const FINDINGS_TOOL = {
+  type: "function" as const,
+  function: {
+    name: "report_findings",
+    description:
+      "Report what you found. An empty list is a valid and expected answer for code that is fine.",
+    parameters: {
+      type: "object",
+      properties: {
+        findings: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              severity: {
+                type: "string",
+                enum: [...SEVERITIES],
+                description:
+                  "high: exploitable, or breaks in production. medium: a real defect with a bounded blast radius. low: worth fixing, harms nothing today.",
+              },
+              line: {
+                type: "integer",
+                description:
+                  "The 1-indexed line number, taken from the numbering in the code you were given. Never guess: if you cannot point at a line, do not report the finding.",
+              },
+              issue: {
+                type: "string",
+                description:
+                  "What is wrong, in one sentence. State the defect, not its category.",
+              },
+              suggestion: {
+                type: "string",
+                description:
+                  "The concrete fix. Show the change, do not describe the direction of it.",
+              },
+            },
+            required: ["severity", "line", "issue", "suggestion"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["findings"],
       additionalProperties: false,
     },
   },
