@@ -28,9 +28,20 @@ export type SpecialistFailure = {
 // failures via index alignment between two arrays, guarded by a comment; a comment
 // is not a type, and misattributing a failure card to the wrong specialist is
 // exactly the kind of bug that survives every test that only exercises success.
-type SpecialistOutcome =
+export type SpecialistOutcome =
   | { ok: true; result: SpecialistResult }
   | { ok: false; failure: SpecialistFailure; usage: Usage };
+
+// How the caller watches the fan-out happen instead of waiting for it to finish.
+//
+// fanOut still returns everything at the end — the route needs the totals — but a
+// review that only speaks when it is over cannot show a pipeline. These fire as each
+// specialist starts and as each one lands, in the order they actually land, which on a
+// parallel fan-out is not the order they were launched in.
+export type FanOutEvents = {
+  onStart?: (specialist: Specialist) => void;
+  onOutcome?: (outcome: SpecialistOutcome) => void;
+};
 
 export type FanOut = {
   results: SpecialistResult[];
@@ -60,6 +71,20 @@ function messagesFor(
 // billed before giving up — a specialist that died after two paid retries still spent
 // real money, and the totals below have to be able to count it.
 async function runOne(
+  specialist: Specialist,
+  code: string,
+  explicitCache: boolean,
+  events: FanOutEvents,
+): Promise<SpecialistOutcome> {
+  events.onStart?.(specialist);
+
+  const outcome = await attempt(specialist, code, explicitCache);
+  events.onOutcome?.(outcome);
+
+  return outcome;
+}
+
+async function attempt(
   specialist: Specialist,
   code: string,
   explicitCache: boolean,
@@ -125,7 +150,11 @@ function zeroUsage(): Usage {
 // of thumb — allSettled, never all — existed to stop one dead specialist taking down
 // a review the user already paid for; that guarantee now lives one level down, inside
 // runOne, where the failure can be attributed by name instead of by array position.
-export async function fanOut(specialists: Specialist[], code: string): Promise<FanOut> {
+export async function fanOut(
+  specialists: Specialist[],
+  code: string,
+  events: FanOutEvents = {},
+): Promise<FanOut> {
   const outcomes: SpecialistOutcome[] = [];
 
   if (specialists.length > 0) {
@@ -139,7 +168,7 @@ export async function fanOut(specialists: Specialist[], code: string): Promise<F
     if (explicitCache) {
       while (remaining.length > 1) {
         const [warmer, ...rest] = remaining;
-        const outcome = await runOne(warmer, code, explicitCache);
+        const outcome = await runOne(warmer, code, explicitCache, events);
         outcomes.push(outcome);
         remaining = rest;
         if (outcome.ok) break;
@@ -147,7 +176,9 @@ export async function fanOut(specialists: Specialist[], code: string): Promise<F
     }
 
     outcomes.push(
-      ...(await Promise.all(remaining.map((s) => runOne(s, code, explicitCache)))),
+      ...(await Promise.all(
+        remaining.map((s) => runOne(s, code, explicitCache, events)),
+      )),
     );
   }
 
