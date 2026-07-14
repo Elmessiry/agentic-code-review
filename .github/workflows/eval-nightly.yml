@@ -1,0 +1,34 @@
+name: Nightly evals
+
+# The evals that CI cannot run.
+#
+# Pull requests replay recorded fixtures: free, deterministic, and a check on the pipeline.
+# This job asks the other question — do the MODELS still behave? — and it can only be
+# answered against the live API, with real money, at real latency, with real
+# nondeterminism.
+#
+# That question still needs asking, because the answer changes without anybody touching
+# this repo. A provider silently reroutes a model to a different backend; a model is
+# updated behind its own name; a vendor's tool-call serialisation quietly breaks. Every one
+# of those turns a working reviewer into a broken one while every test stays green, and the
+# only way to find out is to go and look.
+on:
+  schedule:
+    # 06:00 UTC. Nothing depends on the hour; it just wants to be a nightly, not an hourly.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  live:
+    name: Live model check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run eval -- --live
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
