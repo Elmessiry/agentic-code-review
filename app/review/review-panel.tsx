@@ -2,13 +2,14 @@
 
 import { useState } from "react";
 import dynamic from "next/dynamic";
+import PlanCard, { type PlanResult } from "./plan-card";
 
 // CodeMirror touches `document` as it initialises, so it cannot render on the
 // server. Loading it client-side only keeps the rest of the page server-rendered.
 const CodeEditor = dynamic(() => import("./code-editor"), {
   ssr: false,
   loading: () => (
-    <div className="h-[420px] animate-pulse rounded-md bg-surface" aria-hidden />
+    <div className="bg-surface h-[420px] animate-pulse rounded-md" aria-hidden />
   ),
 });
 
@@ -26,44 +27,50 @@ const STARTER = `function getUser(req, res) {
 }
 `;
 
-type Status = "idle" | "reviewing" | "done" | "error";
+type Status = "idle" | "planning" | "reviewing" | "done" | "error";
 
 export default function ReviewPanel() {
   const [code, setCode] = useState(STARTER);
   const [status, setStatus] = useState<Status>("idle");
+  const [plan, setPlan] = useState<PlanResult | null>(null);
   const [review, setReview] = useState("");
   const [costUsd, setCostUsd] = useState(0);
   const [error, setError] = useState("");
 
-  const busy = status === "reviewing";
+  const busy = status === "planning" || status === "reviewing";
 
-  async function runReview() {
-    setStatus("reviewing");
+  async function post(path: string, body: unknown) {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? "The request failed.");
+    return data;
+  }
+
+  async function run() {
+    setStatus("planning");
     setError("");
     setReview("");
+    setPlan(null);
 
     try {
-      const res = await fetch("/api/review", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code }),
-      });
+      // The plan lands first and renders immediately. Waiting until the review is
+      // also done would throw away the point of having a planner you can audit —
+      // the decision is worth seeing while the work it caused is still running.
+      const decision: PlanResult = await post("/api/plan", { code });
+      setPlan(decision);
 
-      const data = await res.json();
+      setStatus("reviewing");
+      const result = await post("/api/review", { code });
 
-      if (!res.ok) {
-        // The route always sends a human-readable `error`; falling back to a
-        // status code would surface "502" to someone who cannot act on it.
-        setError(data.error ?? "The review failed.");
-        setStatus("error");
-        return;
-      }
-
-      setReview(data.review);
-      setCostUsd(data.costUsd ?? 0);
+      setReview(result.review);
+      setCostUsd(decision.costUsd + (result.costUsd ?? 0));
       setStatus("done");
-    } catch {
-      setError("Could not reach the server. Check your connection and try again.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Something went wrong.");
       setStatus("error");
     }
   }
@@ -72,50 +79,61 @@ export default function ReviewPanel() {
     <div className="grid gap-6 lg:grid-cols-2">
       <section className="flex flex-col gap-3">
         <div className="flex items-baseline justify-between">
-          <h2 className="text-sm font-medium text-muted">Code</h2>
-          <span className="text-xs text-muted">{code.split("\n").length} lines</span>
+          <h2 className="text-muted text-sm font-medium">Code</h2>
+          <span className="text-muted text-xs">{code.split("\n").length} lines</span>
         </div>
 
-        <div className="overflow-hidden rounded-lg border border-border bg-surface">
+        <div className="border-border bg-surface overflow-hidden rounded-lg border">
           <CodeEditor value={code} onChange={setCode} disabled={busy} />
         </div>
 
         <button
-          onClick={runReview}
+          onClick={run}
           disabled={busy || code.trim().length === 0}
-          className="self-start rounded-md bg-accent px-4 py-2 text-sm font-medium text-canvas transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          className="bg-accent text-canvas self-start rounded-md px-4 py-2 text-sm font-medium transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {busy ? "Reviewing…" : "Review"}
+          {status === "planning"
+            ? "Planning…"
+            : status === "reviewing"
+              ? "Reviewing…"
+              : "Review"}
         </button>
       </section>
 
       <section className="flex flex-col gap-3">
         <div className="flex items-baseline justify-between">
-          <h2 className="text-sm font-medium text-muted">Review</h2>
+          <h2 className="text-muted text-sm font-medium">Review</h2>
           {status === "done" && costUsd > 0 && (
-            // Shown because the whole project is an argument about the cost of
-            // running agents. Hiding the number would be odd.
-            <span className="text-xs text-muted">${costUsd.toFixed(5)}</span>
+            // The whole project is an argument about what it costs to run agents.
+            // Hiding the number would be a strange way to make it.
+            <span className="text-muted text-xs">${costUsd.toFixed(5)}</span>
           )}
         </div>
 
-        <div
-          aria-live="polite"
-          className="min-h-[420px] rounded-lg border border-border bg-surface p-4 text-sm leading-relaxed"
-        >
-          {status === "idle" && (
-            <p className="text-muted">
-              Paste code and press Review. Right now a single generalist model reads it —
-              the planner, the specialists and the synthesizer arrive over the next few
-              days.
-            </p>
-          )}
+        <div aria-live="polite" className="flex flex-col gap-3">
+          {plan && <PlanCard plan={plan} />}
 
-          {busy && <p className="animate-pulse text-muted">Reading the code…</p>}
+          <div className="border-border bg-surface min-h-[280px] rounded-lg border p-4 text-sm leading-relaxed">
+            {status === "idle" && (
+              <p className="text-muted">
+                Paste code and press Review. The planner decides which specialists the
+                code needs — then, for now, a single generalist writes the review. The
+                specialists themselves land next.
+              </p>
+            )}
 
-          {status === "error" && <p className="text-high">{error}</p>}
+            {status === "planning" && (
+              <p className="text-muted animate-pulse">Deciding who should look…</p>
+            )}
 
-          {status === "done" && <div className="whitespace-pre-wrap">{review}</div>}
+            {status === "reviewing" && (
+              <p className="text-muted animate-pulse">Reading the code…</p>
+            )}
+
+            {status === "error" && <p className="text-high">{error}</p>}
+
+            {status === "done" && <div className="whitespace-pre-wrap">{review}</div>}
+          </div>
         </div>
       </section>
     </div>
