@@ -2,7 +2,9 @@
 
 import { useState } from "react";
 import dynamic from "next/dynamic";
-import PlanCard, { type PlanResult } from "./plan-card";
+import PlanCard from "./plan-card";
+import FindingsPanel from "./findings-panel";
+import type { ReviewResponse } from "@/lib/pipeline/schema";
 
 // CodeMirror touches `document` as it initialises, so it cannot render on the
 // server. Loading it client-side only keeps the rest of the page server-rendered.
@@ -13,61 +15,48 @@ const CodeEditor = dynamic(() => import("./code-editor"), {
   ),
 });
 
-const STARTER = `function getUser(req, res) {
-  const id = req.query.id;
-  const query = "SELECT * FROM users WHERE id = " + id;
-
-  db.execute(query, (err, rows) => {
-    if (err) {
-      res.status(500).send(err.message);
-      return;
+const STARTER = `app.post("/search", async (req, res) => {
+  const term = sanitizeHtml(req.body.term);
+  const schema = JSON.parse(fs.readFileSync("./schema.json"));
+  const rows = await db.all("SELECT * FROM items WHERE owner = " + req.body.owner);
+  const out = [];
+  for (const row of rows) {
+    if (validate(row, schema)) {
+      out.push(await enrich(row));
     }
-    res.json(rows[0]);
-  });
-}
+  }
+  res.send("<ul>" + out.map((r) => "<li>" + r.name + "</li>").join("") + "</ul>");
+});
 `;
 
-type Status = "idle" | "planning" | "reviewing" | "done" | "error";
+type Status = "idle" | "running" | "done" | "error";
 
 export default function ReviewPanel() {
   const [code, setCode] = useState(STARTER);
   const [status, setStatus] = useState<Status>("idle");
-  const [plan, setPlan] = useState<PlanResult | null>(null);
-  const [review, setReview] = useState("");
-  const [costUsd, setCostUsd] = useState(0);
+  // The shape is declared once, in lib/pipeline/schema.ts, and the route is annotated
+  // with the same type — so a field the server stops sending fails the build here
+  // rather than throwing in a browser.
+  const [result, setResult] = useState<ReviewResponse | null>(null);
   const [error, setError] = useState("");
 
-  const busy = status === "planning" || status === "reviewing";
-
-  async function post(path: string, body: unknown) {
-    const res = await fetch(path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error ?? "The request failed.");
-    return data;
-  }
+  const busy = status === "running";
 
   async function run() {
-    setStatus("planning");
+    setStatus("running");
     setError("");
-    setReview("");
-    setPlan(null);
+    setResult(null);
 
     try {
-      // The plan lands first and renders immediately. Waiting until the review is
-      // also done would throw away the point of having a planner you can audit —
-      // the decision is worth seeing while the work it caused is still running.
-      const decision: PlanResult = await post("/api/plan", { code });
-      setPlan(decision);
+      const res = await fetch("/api/specialists", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "The review failed.");
 
-      setStatus("reviewing");
-      const result = await post("/api/review", { code });
-
-      setReview(result.review);
-      setCostUsd(decision.costUsd + (result.costUsd ?? 0));
+      setResult(data);
       setStatus("done");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Something went wrong.");
@@ -92,48 +81,60 @@ export default function ReviewPanel() {
           disabled={busy || code.trim().length === 0}
           className="bg-accent text-canvas self-start rounded-md px-4 py-2 text-sm font-medium transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {status === "planning"
-            ? "Planning…"
-            : status === "reviewing"
-              ? "Reviewing…"
-              : "Review"}
+          {busy ? "Reviewing…" : "Review"}
         </button>
+
+        {result && (
+          // The cost and the cache hit rate are the argument this project is making.
+          // They belong on the page, not in a log nobody opens.
+          <dl className="border-border text-muted mt-1 grid grid-cols-2 gap-x-4 gap-y-1 rounded-lg border border-dashed p-3 text-xs">
+            <dt>Cost</dt>
+            <dd className="text-ink text-right font-mono">
+              ${result.cost.totalUsd.toFixed(5)}
+            </dd>
+            <dt>Cache ({result.cache.mode})</dt>
+            <dd className="text-ink text-right font-mono">
+              {(result.cache.hitRate * 100).toFixed(0)}% of{" "}
+              {result.cache.inputTokens.toLocaleString()} tok
+            </dd>
+            <dt>Shared prefix</dt>
+            <dd className="text-ink text-right font-mono">
+              {result.cache.prefixTokens.toLocaleString()} tok{" "}
+              {result.cache.clearsFloor ? "✓" : "— under floor, caching off"}
+            </dd>
+          </dl>
+        )}
       </section>
 
       <section className="flex flex-col gap-3">
-        <div className="flex items-baseline justify-between">
-          <h2 className="text-muted text-sm font-medium">Review</h2>
-          {status === "done" && costUsd > 0 && (
-            // The whole project is an argument about what it costs to run agents.
-            // Hiding the number would be a strange way to make it.
-            <span className="text-muted text-xs">${costUsd.toFixed(5)}</span>
-          )}
-        </div>
+        <h2 className="text-muted text-sm font-medium">Review</h2>
 
         <div aria-live="polite" className="flex flex-col gap-3">
-          {plan && <PlanCard plan={plan} />}
+          {result && <PlanCard plan={result.plan} />}
 
-          <div className="border-border bg-surface min-h-[280px] rounded-lg border p-4 text-sm leading-relaxed">
-            {status === "idle" && (
-              <p className="text-muted">
-                Paste code and press Review. The planner decides which specialists the
-                code needs — then, for now, a single generalist writes the review. The
-                specialists themselves land next.
-              </p>
-            )}
+          {status === "idle" && (
+            <div className="border-border bg-surface text-muted min-h-[280px] rounded-lg border p-4 text-sm">
+              Paste code and press Review. A planner picks which specialists the code
+              needs, they read it in parallel, and each reports through its own lens.
+              Resolving the places they disagree is the next piece to land.
+            </div>
+          )}
 
-            {status === "planning" && (
-              <p className="text-muted animate-pulse">Deciding who should look…</p>
-            )}
+          {busy && (
+            <div className="border-border bg-surface text-muted min-h-[280px] animate-pulse rounded-lg border p-4 text-sm">
+              Planning, then reading…
+            </div>
+          )}
 
-            {status === "reviewing" && (
-              <p className="text-muted animate-pulse">Reading the code…</p>
-            )}
+          {status === "error" && (
+            <div className="border-border bg-surface text-high min-h-[120px] rounded-lg border p-4 text-sm">
+              {error}
+            </div>
+          )}
 
-            {status === "error" && <p className="text-high">{error}</p>}
-
-            {status === "done" && <div className="whitespace-pre-wrap">{review}</div>}
-          </div>
+          {result && (
+            <FindingsPanel reports={result.results} failures={result.failures} />
+          )}
         </div>
       </section>
     </div>
