@@ -46,11 +46,10 @@ next-env.d.ts
 .env.sentry-build-plugin
 .env.local
 
-# Local agent config. AGENTS.md is deliberately NOT here — it is toolchain notes a
-# collaborator wants, so it is tracked (as in pr2). CLAUDE.md is just a pointer to
-# it, and .claude/ holds machine-local permissions.
+# Local agent config. Notes to the tooling, not to a reader of this repo.
 .claude/
 CLAUDE.md
+AGENTS.md
 
 # testing (Playwright)
 /test-results/
