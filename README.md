@@ -1,6 +1,6 @@
 # Agentic Code Review
 
-**Paste code, get a review from a team instead of a generalist.** A planner decides which specialists your code needs, they review it in parallel through one lens each, and a synthesizer resolves their disagreements into a single verdict — with an eval harness to prove the whole thing behaves.
+**Paste code, get a review from a team instead of a generalist.** A planner decides which specialists your code needs, they review it in parallel through one lens each, and a synthesizer resolves their disagreements into a single verdict — streamed as it happens, with the real dollar cost on the page.
 
 [![CI](https://github.com/Elmessiry/agentic-code-review/actions/workflows/ci.yml/badge.svg)](https://github.com/Elmessiry/agentic-code-review/actions/workflows/ci.yml)
 ![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=next.js)
