@@ -16,21 +16,21 @@
 // which is deliberate: the first version came to 820 and would have cached nothing at
 // all while looking, in every line of code, like it was caching.
 //
-// Whether it then pays off WITHIN a single review depends entirely on the vendor, and
-// the measured numbers are not close:
+// Whether it then pays off WITHIN a single review depends entirely on the model's
+// caching mode (lib/models.ts), and the measured numbers are not close:
 //
-//   explicit cache, warm-then-fan-out (Sonnet 5) — 64.6% hit rate on a COLD prefix.
-//   One specialist writes the cache, three read it, inside one review, with no repeat
+//   explicit cache, warm-then-fan-out — 64.6% hit rate on a COLD prefix. One
+//   specialist writes the cache, three read it, inside one review, with no repeat
 //   traffic. On a warm prefix: 86.1%, stable across runs.
 //
-//   automatic cache, parallel fan-out (gpt-5-mini) — 59%, then 78%, then 19.7%. The
-//   four requests are in flight at the same instant, so they race: none of them has
-//   written the cache when the others go looking for it, and how many happen to hit is
-//   a matter of timing.
+//   automatic cache, parallel fan-out — 59%, then 78%, then 19.7%. The four requests
+//   are in flight at the same instant, so they race: none of them has written the
+//   cache when the others go looking for it, and how many happen to hit is a matter
+//   of timing.
 //
 // The tidy claim — "the specialists share a prefix, so caching pays off immediately" —
 // is only true where the code serialises the first call, and it only serialises where
-// the vendor charges to write the cache. See fanOut() in lib/pipeline/specialists.ts.
+// the model charges to write the cache. See fanOut() in lib/pipeline/specialists.ts.
 
 import type { ContentBlock } from "@/lib/openrouter";
 import { numberLines } from "./general-review";
@@ -156,8 +156,8 @@ export function sharedPrefix(code: string, explicitCache: boolean): ContentBlock
   ];
 
   if (explicitCache) {
-    // Anthropic and friends: mark the boundary. Everything before it is cached.
-    // The automatic-cache vendors need no marker and would only be confused by one.
+    // Explicit-cache models: mark the boundary. Everything before it is cached.
+    // Automatic-cache models need no marker and would only be confused by one.
     blocks[blocks.length - 1].cache_control = { type: "ephemeral" };
   }
 
