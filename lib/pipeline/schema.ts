@@ -32,7 +32,13 @@ export const SPECIALIST_BRIEFS: Record<Specialist, string> = {
     "Whether the code is testable and what a test would need to assert. Missing edge cases, untestable coupling, absent error-path coverage.",
 };
 
-export type Severity = "high" | "medium" | "low";
+// The single source for the severity scale. The type, the tool schema's enum, and
+// the runtime validation in line-refs.ts all derive from this array — three sites
+// that once spelled the literals independently, where adding a severity to two of
+// them would have made every finding at the new level silently vanish in the third.
+export const SEVERITIES = ["high", "medium", "low"] as const;
+
+export type Severity = (typeof SEVERITIES)[number];
 
 export type Finding = {
   specialist: Specialist;
@@ -142,7 +148,7 @@ export const FINDINGS_TOOL = {
             properties: {
               severity: {
                 type: "string",
-                enum: ["high", "medium", "low"],
+                enum: [...SEVERITIES],
                 description:
                   "high: exploitable, or breaks in production. medium: a real defect with a bounded blast radius. low: worth fixing, harms nothing today.",
               },

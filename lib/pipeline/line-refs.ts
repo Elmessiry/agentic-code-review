@@ -12,7 +12,7 @@
 // because a specialist that keeps inventing line numbers is a specialist to stop paying
 // for, and that is only visible if the number is reported rather than swept up.
 
-import type { Finding } from "./schema";
+import { SEVERITIES, type Finding } from "./schema";
 
 export type Checked = {
   findings: Finding[];
@@ -42,19 +42,44 @@ export function dropImpossibleLines(findings: Finding[], code: string): Checked 
 // context we already hold. Stamping it here — rather than asking the model to repeat it
 // back — removes a field it could get wrong, and there is no reason to let a model
 // misattribute a finding to a colleague.
+//
+// Malformed entries are logged, never silently dropped — the same rule
+// dropImpossibleLines applies to line numbers. A filter that discards quietly turns
+// "the model emitted something outside the schema" into "the specialist found less",
+// and those are very different facts.
 export function attribute(raw: unknown, specialist: Finding["specialist"]): Finding[] {
-  if (!Array.isArray(raw)) return [];
+  if (!Array.isArray(raw)) {
+    if (raw !== undefined && raw !== null) {
+      console.warn(
+        "[line-refs] findings was not an array",
+        JSON.stringify({ specialist, got: typeof raw }),
+      );
+    }
+    return [];
+  }
 
-  const severities = new Set(["high", "medium", "low"]);
+  // Derived from the same const as the Severity type and the tool schema's enum, so
+  // the scale cannot drift apart across its three uses.
+  const severities = new Set<string>(SEVERITIES);
 
-  return raw
-    .filter(
-      (f): f is Finding =>
-        typeof f === "object" &&
-        f !== null &&
-        typeof (f as Finding).issue === "string" &&
-        typeof (f as Finding).suggestion === "string" &&
-        severities.has((f as Finding).severity),
-    )
-    .map((f) => ({ ...f, specialist }));
+  const kept: Finding[] = [];
+  for (const f of raw) {
+    const valid =
+      typeof f === "object" &&
+      f !== null &&
+      typeof (f as Finding).issue === "string" &&
+      typeof (f as Finding).suggestion === "string" &&
+      severities.has((f as Finding).severity);
+
+    if (valid) {
+      kept.push({ ...(f as Finding), specialist });
+    } else {
+      console.warn(
+        "[line-refs] dropped a finding outside the schema",
+        JSON.stringify({ specialist, finding: f }),
+      );
+    }
+  }
+
+  return kept;
 }
