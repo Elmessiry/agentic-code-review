@@ -14,14 +14,21 @@
 
 import { SEVERITIES, type Finding } from "./schema";
 
-export type Checked = {
-  findings: Finding[];
+export type Checked<T> = {
+  findings: T[];
   // How many findings were discarded for pointing at a line that does not exist. This
   // is a hallucination rate, and it is worth watching.
   dropped: number;
 };
 
-export function dropImpossibleLines(findings: Finding[], code: string): Checked {
+// Generic over the finding, because the specialists are not the only agent that emits
+// a line number. The synthesizer re-states the findings it keeps, and re-stating them
+// is another opportunity to get the line wrong — a checked number that goes back
+// through an unchecked model comes out unchecked.
+export function dropImpossibleLines<T extends { line: number }>(
+  findings: T[],
+  code: string,
+): Checked<T> {
   const lines = code.split("\n").length;
 
   const kept = findings.filter((f) => {
@@ -29,7 +36,7 @@ export function dropImpossibleLines(findings: Finding[], code: string): Checked 
     if (!valid) {
       console.warn(
         "[line-refs] dropped a finding pointing at a line that does not exist",
-        JSON.stringify({ line: f.line, lines, specialist: f.specialist, issue: f.issue }),
+        JSON.stringify({ lines, finding: f }),
       );
     }
     return valid;

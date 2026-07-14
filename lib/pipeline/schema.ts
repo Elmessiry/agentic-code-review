@@ -92,42 +92,152 @@ export const PLANNER_TOOL = {
   },
 };
 
-// What the review endpoint sends back.
+export const VERDICTS = ["approve", "changes_requested", "reject"] as const;
+
+export type Verdict = (typeof VERDICTS)[number];
+
+// What the synthesizer produces: one finding, after the duplicates have been merged.
 //
-// Declared here, and imported by BOTH the route and the component that renders it, so
-// the two cannot drift. They already did once: the route moved the planner's cost into
-// a totals object, the card went on reading plan.costUsd, and the page died on
-// undefined.toFixed(). Nothing caught it, because `await res.json()` is `any` and an
-// unchecked cast into a typed shape is a lie the compiler is happy to believe.
+// `sources` is the whole point. Four specialists reading the same twelve lines will
+// independently raise the same defect in four different vocabularies, and a flat list
+// shows it four times as though it were four problems. Merging them into one finding
+// that names who raised it turns the duplication from noise into evidence — a defect
+// three specialists found through three different lenses is likelier to be real than
+// one that only a single lens saw.
+export type SynthesizedFinding = {
+  severity: Severity;
+  line: number;
+  issue: string;
+  suggestion: string;
+  sources: Specialist[];
+  // Set only where the specialists actually disagreed — most often about severity,
+  // because the same defect is a denial-of-service to Security and a hot-path cost to
+  // Performance. This is where the disagreement gets named and settled, rather than
+  // averaged away into a number nobody argued for.
+  note?: string;
+};
+
+export type Synthesis = {
+  summary: string;
+  findings: SynthesizedFinding[];
+  verdict: Verdict;
+};
+
+// The tool the synthesizer is forced to call.
 //
-// The route annotates its payload with this type, so a field the UI needs and the
-// server stopped sending is now a build error rather than a white screen.
-export type ReviewResponse = {
-  plan: Plan & {
-    overrides: Record<string, string>;
-    costUsd: number;
-  };
-  results: {
-    specialist: Specialist;
-    findings: Finding[];
-    droppedLineRefs: number;
-  }[];
-  failures: { specialist: Specialist; error: string }[];
-  cost: {
-    planUsd: number;
-    specialistsUsd: number;
-    totalUsd: number;
-  };
-  cache: {
-    mode: string;
-    model: string;
-    prefixTokens: number;
-    minCacheTokens: number;
-    clearsFloor: boolean;
-    cachedTokens: number;
-    inputTokens: number;
-    hitRate: number;
-  };
+// The property ORDER here is load-bearing, which is not something a JSON schema
+// usually gets to say. Models emit properties in the order the schema declares them,
+// and the arguments of a forced tool call stream back as raw JSON fragments — so
+// `summary` first is what lets its prose be decoded out of the half-written object and
+// forwarded to the browser while the findings are still being written. Move it below
+// `findings` and the review still works, but the user watches a spinner until the
+// whole object lands. See streamTool() in lib/openrouter.ts.
+export const SYNTHESIS_TOOL = {
+  type: "function" as const,
+  function: {
+    name: "write_review",
+    description:
+      "Merge the specialists' findings into one review: dedupe, resolve their disagreements, rank, and give a verdict.",
+    parameters: {
+      type: "object",
+      properties: {
+        summary: {
+          type: "string",
+          description:
+            "Two to four sentences of plain prose, addressed to the author. Lead with what actually matters. If the specialists disagreed, say so and say how you settled it. No headings, no bullets, no restating the finding list.",
+        },
+        findings: {
+          type: "array",
+          description:
+            "The merged findings, most severe first. Fewer than you were given: duplicates become one finding with several sources.",
+          items: {
+            type: "object",
+            properties: {
+              severity: {
+                type: "string",
+                enum: [...SEVERITIES],
+                description:
+                  "Your judgement, not an average of theirs. Where they disagreed, pick one and justify it in `note`.",
+              },
+              line: {
+                type: "integer",
+                description:
+                  "The 1-indexed line, copied from the finding you are merging. Do not renumber, do not guess.",
+              },
+              issue: {
+                type: "string",
+                description:
+                  "What is wrong, in one sentence. If several specialists saw it differently, state the defect once, in the terms that matter most.",
+              },
+              suggestion: { type: "string", description: "The concrete fix." },
+              sources: {
+                type: "array",
+                items: { type: "string", enum: [...SPECIALISTS] },
+                description:
+                  "Every specialist that raised this defect. More than one is agreement, and agreement is evidence.",
+              },
+              note: {
+                type: "string",
+                description:
+                  "Only when the specialists disagreed: name the disagreement and say why you settled it this way. Omit entirely otherwise — an empty note on every finding is noise.",
+              },
+            },
+            required: ["severity", "line", "issue", "suggestion", "sources"],
+            additionalProperties: false,
+          },
+        },
+        verdict: {
+          type: "string",
+          enum: [...VERDICTS],
+          description:
+            "approve: nothing here blocks a merge. changes_requested: a real defect a reviewer would want fixed first. reject: exploitable, or broken in a way that makes the change unsalvageable as written.",
+        },
+      },
+      required: ["summary", "findings", "verdict"],
+      additionalProperties: false,
+    },
+  },
+};
+
+// The events the review endpoint streams.
+//
+// Declared here, and imported by BOTH the route that emits them and the component that
+// renders them, so the two cannot drift. They already did once: the route moved the
+// planner's cost into a totals object, the card went on reading plan.costUsd, and the
+// page died on undefined.toFixed(). Nothing caught it, because a parsed JSON payload is
+// `any` and an unchecked cast into a typed shape is a lie the compiler is happy to
+// believe. A discriminated union makes an unhandled event a build error.
+export type ReviewEvent =
+  | { type: "plan"; plan: Plan & { overrides: Record<string, string>; costUsd: number } }
+  | { type: "specialist_start"; specialist: Specialist }
+  | {
+      type: "specialist_done";
+      specialist: Specialist;
+      findings: Finding[];
+      droppedLineRefs: number;
+    }
+  | { type: "specialist_error"; specialist: Specialist; error: string }
+  | { type: "synthesis_delta"; text: string }
+  | { type: "synthesis_done"; findings: SynthesizedFinding[]; verdict: Verdict }
+  | { type: "done"; cost: ReviewCost; cache: CacheReport }
+  | { type: "error"; error: string };
+
+export type ReviewCost = {
+  planUsd: number;
+  specialistsUsd: number;
+  synthesisUsd: number;
+  totalUsd: number;
+};
+
+export type CacheReport = {
+  mode: string;
+  model: string;
+  prefixTokens: number;
+  minCacheTokens: number;
+  clearsFloor: boolean;
+  cachedTokens: number;
+  inputTokens: number;
+  hitRate: number;
 };
 
 // The tool every specialist is forced to call. One schema for all four, so the

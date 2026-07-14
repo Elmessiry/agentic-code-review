@@ -1,6 +1,7 @@
 import {
   callTool,
   OpenRouterError,
+  ZERO_USAGE,
   type ChatMessage,
   type Usage,
 } from "@/lib/openrouter";
@@ -28,9 +29,20 @@ export type SpecialistFailure = {
 // failures via index alignment between two arrays, guarded by a comment; a comment
 // is not a type, and misattributing a failure card to the wrong specialist is
 // exactly the kind of bug that survives every test that only exercises success.
-type SpecialistOutcome =
+export type SpecialistOutcome =
   | { ok: true; result: SpecialistResult }
   | { ok: false; failure: SpecialistFailure; usage: Usage };
+
+// How the caller watches the fan-out happen instead of waiting for it to finish.
+//
+// fanOut still returns everything at the end — the route needs the totals — but a
+// review that only speaks when it is over cannot show a pipeline. These fire as each
+// specialist starts and as each one lands, in the order they actually land, which on a
+// parallel fan-out is not the order they were launched in.
+export type FanOutEvents = {
+  onStart?: (specialist: Specialist) => void;
+  onOutcome?: (outcome: SpecialistOutcome) => void;
+};
 
 export type FanOut = {
   results: SpecialistResult[];
@@ -63,12 +75,29 @@ async function runOne(
   specialist: Specialist,
   code: string,
   explicitCache: boolean,
+  events: FanOutEvents,
+  signal?: AbortSignal,
+): Promise<SpecialistOutcome> {
+  events.onStart?.(specialist);
+
+  const outcome = await attempt(specialist, code, explicitCache, signal);
+  events.onOutcome?.(outcome);
+
+  return outcome;
+}
+
+async function attempt(
+  specialist: Specialist,
+  code: string,
+  explicitCache: boolean,
+  signal?: AbortSignal,
 ): Promise<SpecialistOutcome> {
   try {
     const { args, usage } = await callTool<{ findings: unknown }>({
       role: "specialist",
       messages: messagesFor(specialist, code, explicitCache),
       tool: FINDINGS_TOOL,
+      signal,
     });
 
     const { findings, dropped } = dropImpossibleLines(
@@ -91,13 +120,9 @@ async function runOne(
         // a bare fact.
         error: "This specialist could not be reached.",
       },
-      usage: error instanceof OpenRouterError ? error.usage : zeroUsage(),
+      usage: error instanceof OpenRouterError ? error.usage : { ...ZERO_USAGE },
     };
   }
-}
-
-function zeroUsage(): Usage {
-  return { costUsd: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
 }
 
 // Runs the selected specialists and returns whatever came back — results, failures,
@@ -125,7 +150,12 @@ function zeroUsage(): Usage {
 // of thumb — allSettled, never all — existed to stop one dead specialist taking down
 // a review the user already paid for; that guarantee now lives one level down, inside
 // runOne, where the failure can be attributed by name instead of by array position.
-export async function fanOut(specialists: Specialist[], code: string): Promise<FanOut> {
+export async function fanOut(
+  specialists: Specialist[],
+  code: string,
+  events: FanOutEvents = {},
+  signal?: AbortSignal,
+): Promise<FanOut> {
   const outcomes: SpecialistOutcome[] = [];
 
   if (specialists.length > 0) {
@@ -139,7 +169,7 @@ export async function fanOut(specialists: Specialist[], code: string): Promise<F
     if (explicitCache) {
       while (remaining.length > 1) {
         const [warmer, ...rest] = remaining;
-        const outcome = await runOne(warmer, code, explicitCache);
+        const outcome = await runOne(warmer, code, explicitCache, events, signal);
         outcomes.push(outcome);
         remaining = rest;
         if (outcome.ok) break;
@@ -147,7 +177,9 @@ export async function fanOut(specialists: Specialist[], code: string): Promise<F
     }
 
     outcomes.push(
-      ...(await Promise.all(remaining.map((s) => runOne(s, code, explicitCache)))),
+      ...(await Promise.all(
+        remaining.map((s) => runOne(s, code, explicitCache, events, signal)),
+      )),
     );
   }
 

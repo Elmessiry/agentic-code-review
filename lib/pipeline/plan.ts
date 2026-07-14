@@ -21,13 +21,17 @@ type PlannerArgs = {
 // seen something alarming. Where they disagree, the tripwire wins — but only ever in
 // the direction of running MORE specialists. Nothing in this function can remove a
 // specialist the tripwire asked for.
-export async function plan(code: string): Promise<{ plan: Plan; usage: Usage }> {
+export async function plan(
+  code: string,
+  signal?: AbortSignal,
+): Promise<{ plan: Plan; usage: Usage }> {
   const forced = tripwires(code);
 
   const { args, usage } = await callTool<PlannerArgs>({
     role: "planner",
     messages: plannerMessages(code),
     tool: PLANNER_TOOL,
+    signal,
   });
 
   const { agents: chosen, dropped } = coerceSpecialists(args.relevant_agents);

@@ -1,6 +1,6 @@
 # Agentic Code Review
 
-**Paste code, get a review from a team instead of a generalist.** A planner decides which specialists your code needs, they review it in parallel through one lens each, and a synthesizer resolves their disagreements into a single verdict — with an eval harness to prove the whole thing behaves.
+**Paste code, get a review from a team instead of a generalist.** A planner decides which specialists your code needs, they review it in parallel through one lens each, and a synthesizer resolves their disagreements into a single verdict — streamed as it happens, with the real dollar cost on the page.
 
 [![CI](https://github.com/Elmessiry/agentic-code-review/actions/workflows/ci.yml/badge.svg)](https://github.com/Elmessiry/agentic-code-review/actions/workflows/ci.yml)
 ![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=next.js)
@@ -20,10 +20,42 @@ than requested in a prompt and hoped for.
 Performance, Readability, Test Coverage. Each returns structured findings — severity,
 line, defect, fix — never prose.
 
-**A generalist reviewer** is still in the repo and stays there permanently. It is the
-control group: now that four specialists exist, the honest question is whether all
-this orchestration actually beats one good prompt, and that only stays answerable
-while the one good prompt is still here to compare against.
+**A synthesizer** that merges them into one review: it dedupes, resolves the places they
+disagree, ranks what is left, and returns a verdict. Its summary streams a word at a time
+while the findings are still arriving.
+
+**The whole pipeline runs on one connection.** `POST /api/review` is a single SSE stream —
+the planner's decision is on screen before the specialists start, each specialist flips
+from reading to done or failed in place, and the synthesis writes itself underneath.
+
+**A generalist reviewer** is still in the repo and stays there permanently, at
+`/api/baseline`. It is the control group: now that a whole pipeline exists, the honest
+question is whether all this orchestration actually beats one good prompt, and that only
+stays answerable while the one good prompt is still here to compare against.
+
+### Four findings, one defect
+
+Nine findings came back from two specialists on the twelve-line handler the app opens
+with. Six survived synthesis, and the merge is the interesting part:
+
+| line | severity | raised by                  | defect                                               |
+| ---- | -------- | -------------------------- | ---------------------------------------------------- |
+| 4    | high     | **Security + Performance** | `req.body.owner` concatenated into SQL               |
+| 11   | high     | Security                   | `r.name` interpolated into HTML unescaped            |
+| 1    | high     | Security                   | no auth check on a route that reads any owner's data |
+| 3    | medium   | **Security + Performance** | `schema.json` read and parsed on every request       |
+| 8    | medium   | Performance                | `await` inside the loop, serially                    |
+| 2    | low      | **Security + Performance** | `sanitizeHtml` result never used                     |
+
+Two lenses reached line 3 by different roads — Security saw an unhandled crash on a
+missing file, Performance saw wasted I/O on the hot path — and the synthesizer said so, in
+the summary, in its own words: _"both are right, and the fix (load once at startup)
+addresses both."_ That sentence could not have come from any single reviewer, and it is
+the entire argument for the design.
+
+A finding with two independent sources is not the same object as a finding with one.
+Agreement is the only corroborating signal this pipeline can produce, so it is carried
+through the merge (`sources: string[]`) and shown on the page rather than averaged away.
 
 ### One specialist failing does not fail the review
 
@@ -41,6 +73,55 @@ the fan-out boundary and take the others with it.
 A failed specialist gets a card saying so, in place. A specialist with nothing to
 report says that out loud too — an empty section and a silently-failed section look
 identical otherwise, and the difference matters.
+
+### Structured output and streaming prose, from one call
+
+The synthesizer has to do two things that normally fight. It must return **structure** —
+deduped findings, their sources, a verdict — which means a forced tool call. And its
+summary must **stream**, because it is the one output a human sits and reads, and fifteen
+seconds of spinner is a worse product than words appearing. The usual escape is two calls,
+one structured and one prose: double the latency, double the bill, and two answers free to
+disagree with each other.
+
+They do not actually fight. A forced tool call's `arguments` stream back as well — as raw
+JSON fragments, split wherever the network split them. This was a real chunk boundary:
+
+```
+{"summary": "The code buil     ds SQL que     ries by direct     ly concatenating str
+```
+
+So if the prose field is declared **first** in the tool schema, its value can be decoded
+out of an object that is still being written, forwarded as it grows, and the completed
+buffer parsed for the structure at the end. One call. Streamed prose, validated structure.
+
+The decoding has teeth. A fragment can end **inside an escape sequence**, where a naive
+slice emits a lone backslash or half of a `\uXXXX` and corrupts the text from that
+character onward — so the tail is trimmed until what is left is something JSON will
+actually parse. And the field is located once and remembered, so a later value that
+happens to contain the field's own name cannot hijack the decoder mid-stream.
+
+The cost of the trick, stated honestly: the model commits to its summary **before** it
+writes the findings it is summarising, because that is the order the schema forces. That
+is affordable here only because synthesis is re-ranking work it was handed, not discovery.
+Nothing in the summary depends on a conclusion the model has not reached yet.
+
+### What it costs, and where the money actually goes
+
+One review of the twelve-line handler, measured — real dollars from `usage.cost`, never
+estimated from token counts:
+
+| stage                      | cost          | share   |
+| -------------------------- | ------------- | ------- |
+| planner                    | $0.000764     | 2%      |
+| specialists (×2, parallel) | $0.008362     | 27%     |
+| **synthesizer**            | **$0.021596** | **70%** |
+| **total**                  | **$0.030722** |         |
+
+The expensive part of this architecture is not the fan-out everyone worries about. It is
+the **single call at the end** — 2.5× what all the specialists cost together, because the
+synthesizer is the one role still pointed at an expensive model. Which model each role
+deserves is a question with a number attached to it now, and the eval harness is what will
+answer it.
 
 ### The cost shown includes the attempts that died
 
@@ -132,25 +213,20 @@ costs a fraction of a cent. Every false negative it prevents costs a CVE.
 
 ## What doesn't exist yet
 
-The synthesizer, the streaming pipeline, the visualisation, the eval harness, the rate
-limit and the spend cap. This section shrinks as they land.
+The pipeline visualisation, the eval harness, the rate limit and the spend cap. This
+section shrinks as they land.
 
 ```
-planned:  guard → tripwire → plan → specialists (parallel) → synthesize → stream
-today:    guard → tripwire → plan → specialists (parallel)
+today:  guard → tripwire → plan → specialists (parallel) → synthesize → stream
+next:   an eval harness that scores it, and a model matrix that picks the models
 ```
 
-The synthesizer is next, and the specialists have already made the case for it. On a
-single twelve-line handler, **all four flagged line 3** — each through its own lens, at
-three different severities:
-
-- Security: "blocks the event loop, so a request flood causes a DoS" _(medium)_
-- Performance: "reparses the file on every request" _(**high**)_
-- Readability: "hides its role as a dependency"
-- Test Coverage: "tests must touch the filesystem or mock `fs`"
-
-Four findings, one defect, no agreement on how much it matters. Deduplicating that and
-resolving the disagreement is a job, and it is the synthesizer's.
+The models are still chosen by argument rather than by measurement, and the cost table
+above says exactly where that hurts: 70% of every review is one call to the most expensive
+model in the registry. The eval harness scores candidates on recall, false-positive rate,
+schema conformance, latency and real cost — and whatever it picks replaces the defaults in
+`lib/models.ts`. "My eval harness told me which model to use" is a different claim from "I
+read that this one is good."
 
 ## Design notes
 

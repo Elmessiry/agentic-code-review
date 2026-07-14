@@ -2,7 +2,7 @@
 
 import {
   SPECIALIST_LABELS,
-  type ReviewResponse,
+  type ReviewEvent,
   type Specialist,
 } from "@/lib/pipeline/schema";
 
@@ -14,8 +14,10 @@ import {
 // them money or lost them a vulnerability. So it shows what it skipped, why, and —
 // when the tripwire overruled it — who won.
 
-// One source of truth for the payload shape: lib/pipeline/schema.ts.
-export type PlanResult = ReviewResponse["plan"];
+// One source of truth for the payload shape: lib/pipeline/schema.ts. Pulled out of the
+// event union rather than restated, so a field the server stops sending fails the build
+// here instead of throwing in somebody's browser.
+export type PlanResult = Extract<ReviewEvent, { type: "plan" }>["plan"];
 
 function Pill({
   children,
