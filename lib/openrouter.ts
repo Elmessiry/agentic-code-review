@@ -160,7 +160,14 @@ export function chatCompletion({
         ...(tool ? { require_parameters: true } : {}),
       },
     }),
-    signal: signal ?? AbortSignal.timeout(timeoutMs ?? TIMEOUT_MS),
+    // Two ways this call can be cut short, and it must obey both. The timeout catches a
+    // hung upstream. The caller's signal is the user closing the tab — and an upstream
+    // call nobody is waiting for is one nobody should be paying for either. Passing only
+    // the caller's signal (the previous behaviour) silently discarded the timeout.
+    signal: AbortSignal.any([
+      AbortSignal.timeout(timeoutMs ?? TIMEOUT_MS),
+      ...(signal ? [signal] : []),
+    ]),
   });
 }
 
@@ -178,7 +185,11 @@ const MAX_ATTEMPTS = 3;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const ZERO_USAGE: Usage = {
+// The zero value, in one place. It was defined twice — once here and once in
+// lib/pipeline/specialists.ts — which is one definition too many: adding a field to
+// Usage would have compiled cleanly with only one of them updated, and the other would
+// have quietly produced an undefined in a cost total.
+export const ZERO_USAGE: Usage = {
   costUsd: 0,
   inputTokens: 0,
   outputTokens: 0,
@@ -245,6 +256,11 @@ async function completeWithRetry<T>(
       if (error instanceof OpenRouterError) addUsage(usage, error.usage);
       last = error as Error;
     }
+
+    // The caller is gone — the tab closed, or the pipeline ran out of budget. Retrying
+    // now spends money on an answer with no recipient, and an aborted fetch would fail
+    // identically on every attempt anyway.
+    if (opts.signal?.aborted) break;
 
     // Anything already streamed to the user is history. Do not overwrite it.
     if (committed()) break;
@@ -420,7 +436,9 @@ export async function streamTool<T>(
 
           args += fragment;
 
-          const text = field.advance(args);
+          // The decoder is fed the fragment, not the whole buffer: each character is
+          // decoded once instead of the accumulated string being re-parsed per chunk.
+          const text = field.push(fragment);
           if (text) {
             started = true;
             onDelta(text);

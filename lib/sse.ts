@@ -50,8 +50,18 @@ export async function* sseEvents(res: Response): AsyncGenerator<unknown> {
       }
     }
   } finally {
-    // Releases the socket back to the pool when a caller stops reading early — at
-    // [DONE], or because the loop above threw.
+    // Cancel, not just release. A caller that stops reading early — at [DONE], or
+    // because the loop above threw on a mid-stream error payload — leaves an undrained
+    // body behind, and releasing the lock alone does not tell the transport that nobody
+    // is coming back for the rest. The connection is then held open while the retry
+    // above opens a second one, so a run of transient failures accumulates sockets for
+    // the life of the request. Cancelling discards the remainder and frees it.
+    try {
+      await reader.cancel();
+    } catch {
+      // The stream may already be errored or closed, in which case there is nothing to
+      // cancel and nothing to report — this is cleanup, not a code path with an opinion.
+    }
     reader.releaseLock();
   }
 }
