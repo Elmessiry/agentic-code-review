@@ -4,8 +4,6 @@
 // behind one URL. We call it with plain `fetch` (no SDK) on purpose: it keeps the
 // wire format visible — which matters here, because this project cares about
 // details an SDK hides (cache breakpoints, per-call cost, provider routing).
-//
-// Ported from pr1's lib/openrouter.ts and extended.
 
 import { modelFor, type Role } from "@/lib/models";
 
