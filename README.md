@@ -16,11 +16,65 @@ shows you what it picked, what it skipped, and why — before any review runs. I
 forced through a tool call, so "return this shape" is enforced by the API rather
 than requested in a prompt and hoped for.
 
-**A generalist reviewer** still writes the actual review, because the specialists
-do not exist yet. It stays in the repo permanently once they do: it is the control
-group. When four specialists and a synthesizer exist, the honest question is
-whether all that orchestration beats one good prompt, and that only stays
-answerable while the one good prompt is still here to compare against.
+**Four specialists**, running in parallel, each reporting through one lens: Security,
+Performance, Readability, Test Coverage. Each returns structured findings — severity,
+line, defect, fix — never prose.
+
+**A generalist reviewer** is still in the repo and stays there permanently. It is the
+control group: now that four specialists exist, the honest question is whether all
+this orchestration actually beats one good prompt, and that only stays answerable
+while the one good prompt is still here to compare against.
+
+### One specialist failing does not fail the review
+
+`Promise.allSettled`, never `Promise.all`. This is not a precaution — it happened. On
+one run two specialists died at once: one returned its reasoning with **no tool call at
+all** despite `tool_choice` naming the function, and the other hit the timeout. The
+other two finished, and the review still stands. `Promise.all` rejects on the first
+failure and would have thrown away work already paid for, to report an outage that was
+not one.
+
+A failed specialist gets a card saying so, in place. A specialist with nothing to
+report says that out loud too — an empty section and a silently-failed section look
+identical otherwise, and the difference matters.
+
+### Caching is not one primitive, and it changes the architecture
+
+The obvious move is to cache each specialist's system prompt, since those repeat every
+request. It caches **nothing**: those prompts run a few hundred tokens, and every vendor
+silently ignores a cache breakpoint below its floor — 1,024 tokens on most models, 4,096
+on some. Not an error. A hit rate of zero while every line of your code says you are
+caching.
+
+So the prefix is built the other way round. Everything the four specialists **share**
+goes first as one cacheable block — severity taxonomy, reporting rules, worked examples,
+and the code itself — and only the short per-specialist brief comes after the breakpoint.
+
+Then the fan-out shape has to follow the vendor's pricing, because the two disagree:
+
+|                                          | cache write       | right move                   | measured hit rate                 |
+| ---------------------------------------- | ----------------- | ---------------------------- | --------------------------------- |
+| **Anthropic** (explicit `cache_control`) | **1.25x premium** | warm one, then fan out three | **64.6% cold**, then 86.1%, 86.1% |
+| **OpenAI / DeepSeek** (automatic)        | free              | fire all four at once        | 59%, 78%, 19.7%                   |
+
+Fire four at a cold prefix on Anthropic and all four miss, all four _write_, and the
+prefix costs ~5x instead of 4x — **caching has made it more expensive**. So the first
+specialist goes alone, writes the cache, and the other three read it at ~0.1x. That
+64.6% on a _cold_ prefix is the payoff landing inside a single review, with no repeat
+traffic at all.
+
+The automatic-cache numbers swing wildly because four simultaneous requests race a cache
+none of them has written yet. That is the honest result, and it is why `ModelSpec` carries
+a `caching` mode rather than a boolean.
+
+### Line numbers are checked, not trusted
+
+Models are bad at counting lines, so the code is sent pre-numbered. That removes the
+guesswork but not the confidence: a model sure about a bug and vague about its location
+still emits a plausible integer. Every line reference is checked against the real file
+and dropped if it points past the end, and the count of what was dropped is shown on the
+specialist that produced it. A reader who follows a wrong line number does not conclude
+the line number is wrong — they conclude the tool is.
 
 ### The planner can be overruled, and it needs to be
 
@@ -61,13 +115,25 @@ costs a fraction of a cent. Every false negative it prevents costs a CVE.
 
 ## What doesn't exist yet
 
-The specialists, the synthesizer, the streaming pipeline, the visualisation, the
-eval harness, the rate limit and the spend cap. This section shrinks as they land.
+The synthesizer, the streaming pipeline, the visualisation, the eval harness, the rate
+limit and the spend cap. This section shrinks as they land.
 
 ```
 planned:  guard → tripwire → plan → specialists (parallel) → synthesize → stream
-today:    guard → tripwire → plan → one generalist agent
+today:    guard → tripwire → plan → specialists (parallel)
 ```
+
+The synthesizer is next, and the specialists have already made the case for it. On a
+single twelve-line handler, **all four flagged line 3** — each through its own lens, at
+three different severities:
+
+- Security: "blocks the event loop, so a request flood causes a DoS" _(medium)_
+- Performance: "reparses the file on every request" _(**high**)_
+- Readability: "hides its role as a dependency"
+- Test Coverage: "tests must touch the filesystem or mock `fs`"
+
+Four findings, one defect, no agreement on how much it matters. Deduplicating that and
+resolving the disagreement is a job, and it is the synthesizer's.
 
 ## Design notes
 
