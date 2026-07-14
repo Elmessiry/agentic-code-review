@@ -27,16 +27,34 @@ while the one good prompt is still here to compare against.
 
 ### One specialist failing does not fail the review
 
-`Promise.allSettled`, never `Promise.all`. This is not a precaution — it happened. On
-one run two specialists died at once: one returned its reasoning with **no tool call at
-all** despite `tool_choice` naming the function, and the other hit the timeout. The
-other two finished, and the review still stands. `Promise.all` rejects on the first
-failure and would have thrown away work already paid for, to report an outage that was
-not one.
+This is not a precaution — it happened. On one run two specialists died at once: one
+returned its reasoning with **no tool call at all** despite `tool_choice` naming the
+function, and the other hit the timeout. The other two finished, and the review still
+stands.
+
+The guarantee lives inside each specialist run, not at the fan-out: a run catches its
+own failure — where its identity is still in scope — and resolves to an outcome that
+names who failed and what the failed attempts had already been billed. Nothing
+downstream reconstructs who failed from array positions, and no rejection can cross
+the fan-out boundary and take the others with it.
 
 A failed specialist gets a card saying so, in place. A specialist with nothing to
 report says that out loud too — an empty section and a silently-failed section look
 identical otherwise, and the difference matters.
+
+### The cost shown includes the attempts that died
+
+Every model call runs under one retry policy with one budget: transient HTTP failures,
+timeouts, and — measured, not assumed — a 200 whose forced tool call is missing or
+truncated all count against the same three attempts. Usage is accumulated across
+**every billed attempt**, and a specialist that fails after two paid retries still
+contributes its spend to the total on the page. A cost figure that only counted the
+winning attempts would be quietly optimistic on exactly the requests that went wrong.
+
+On an explicit-cache model, the cache-warming first call must actually **succeed**
+before the others fan out; if it dies, the next specialist takes over as the warmer.
+Fanning out behind a failed warmer would send three parallel writes at a cold prefix —
+the exact cost inversion the sequencing exists to avoid.
 
 ### Caching is not one primitive, and it changes the architecture
 
