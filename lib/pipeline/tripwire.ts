@@ -141,6 +141,22 @@ const TRIPWIRES: Tripwire[] = [
     test: awaitInsideLoop,
     because: "awaits inside a loop, which is the shape of an N+1",
   },
+  {
+    // Blocking I/O, which the planner reliably reads as a Security concern and nothing
+    // else. On a request path a synchronous read does not just cost time, it stops the
+    // event loop for every other request in flight — and that is a Performance finding by
+    // any reading, whatever the planner decided it was.
+    //
+    // Named calls rather than a catch-all /\w+Sync\(/: the point is to be dumb, not to be
+    // clever, and a rule nobody can predict the behaviour of is a rule that gets deleted
+    // the first time it misfires.
+    specialist: "performance",
+    test: matches(
+      /\b(?:readFileSync|writeFileSync|appendFileSync|readdirSync|statSync|existsSync)\s*\(/,
+    ),
+    because:
+      "calls a synchronous filesystem API, which blocks the event loop while it runs",
+  },
 ];
 
 export type Forced = {
