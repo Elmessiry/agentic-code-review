@@ -123,7 +123,7 @@ async function runSynthesis(
 ): Promise<number> {
   const approve = (text: string) => {
     emit({ type: "synthesis_delta", text });
-    emit({ type: "synthesis_done", findings: [], verdict: "approve" });
+    emit({ type: "synthesis_done", findings: [], verdict: "approve", degraded: false });
     return 0;
   };
 
@@ -168,6 +168,7 @@ async function runSynthesis(
       type: "synthesis_done",
       findings: synthesis.findings,
       verdict: synthesis.verdict,
+      degraded: false,
     });
 
     return usage.costUsd;
@@ -204,6 +205,7 @@ async function runSynthesis(
       type: "synthesis_done",
       findings: merged.findings,
       verdict: merged.verdict,
+      degraded: true,
     });
 
     // The failed attempts were still billed, and a cost figure that quietly dropped them

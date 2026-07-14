@@ -18,7 +18,7 @@ import type { Case, FindingExpectation } from "./types";
 // suite carries a false-positive budget, and the clean case — code that is genuinely fine
 // — is the one whose result matters most. Zero high-severity findings, or the run fails.
 //
-//   npm run eval             replay the recorded calls (free, deterministic, what CI runs)
+//   npm run eval             replay recorded calls (free, deterministic; CI runs this)
 //   npm run eval -- --live   hit the real API
 //   npm run eval -- --record hit the real API and save the responses as fixtures
 
@@ -41,6 +41,9 @@ type Transcript = {
   summary: string;
   findings: SynthesizedFinding[];
   verdict: Verdict | null;
+  // The synthesizer failed and a machine merged the findings instead. Worth counting: it
+  // is the difference between a model that can hold a schema and one that cannot.
+  degraded: boolean;
   cost: ReviewCost;
 };
 
@@ -56,6 +59,7 @@ async function transcribe(code: string): Promise<Transcript> {
     summary: "",
     findings: [],
     verdict: null,
+    degraded: false,
     cost: { planUsd: 0, specialistsUsd: 0, synthesisUsd: 0, totalUsd: 0 },
   };
 
@@ -84,6 +88,7 @@ async function transcribe(code: string): Promise<Transcript> {
       case "synthesis_done":
         t.findings = event.findings;
         t.verdict = event.verdict;
+        t.degraded = event.degraded;
         break;
       case "done":
         t.cost = event.cost;
@@ -223,6 +228,79 @@ function score(c: Case, t: Transcript) {
   return { checks, expected, recalled, falsePositives };
 }
 
+type Suite = {
+  recall: number;
+  falsePositives: number;
+  conformance: number;
+  costUsd: number;
+  seconds: number;
+  degraded: number;
+  failedCases: number;
+  cases: number;
+};
+
+async function runSuite(files: string[], report: boolean): Promise<Suite> {
+  let expected = 0;
+  let recalled = 0;
+  let falsePositives = 0;
+  let rawFindings = 0;
+  let dropped = 0;
+  let cost = 0;
+  let degraded = 0;
+  let failedCases = 0;
+  const started = Date.now();
+
+  for (const file of files) {
+    const c: Case = JSON.parse(await readFile(`evals/cases/${file}`, "utf8"));
+
+    const t0 = Date.now();
+    const t = await transcribe(c.code);
+    const ms = Date.now() - t0;
+
+    const s = score(c, t);
+
+    expected += s.expected;
+    recalled += s.recalled;
+    falsePositives += s.falsePositives;
+    rawFindings += t.rawFindings;
+    dropped += t.droppedLineRefs;
+    cost += t.cost.totalUsd;
+    if (t.degraded) degraded++;
+
+    const bad = s.checks.filter((x) => !x.ok);
+    if (bad.length > 0) failedCases++;
+
+    if (report) {
+      console.log(
+        `${bad.length === 0 ? "PASS" : "FAIL"}  ${c.name.padEnd(17)}` +
+          `${t.agents.join("+") || "no specialists"}` +
+          `  ${t.findings.length} findings  ${t.verdict ?? "-"}` +
+          `${t.degraded ? " (merged without a model)" : ""}` +
+          `  $${t.cost.totalUsd.toFixed(5)}  ${(ms / 1000).toFixed(1)}s`,
+      );
+
+      for (const check of s.checks) {
+        if (!check.ok) {
+          console.log(`        ✗ ${check.label}`);
+          if (check.detail) console.log(`          ${check.detail}`);
+        }
+      }
+      if (bad.length > 0) console.log(`        why this case exists: ${c.asserts}\n`);
+    }
+  }
+
+  return {
+    recall: expected === 0 ? 1 : recalled / expected,
+    falsePositives,
+    conformance: rawFindings === 0 ? 1 : 1 - dropped / (rawFindings + dropped),
+    costUsd: cost,
+    seconds: (Date.now() - started) / 1000,
+    degraded,
+    failedCases,
+    cases: files.length,
+  };
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const recording = args.includes("--record");
@@ -242,64 +320,23 @@ async function main() {
 
   const files = (await readdir("evals/cases")).filter((f) => f.endsWith(".json")).sort();
 
-  let expected = 0;
-  let recalled = 0;
-  let falsePositives = 0;
-  let rawFindings = 0;
-  let dropped = 0;
-  let cost = 0;
-  let failedCases = 0;
-
-  for (const file of files) {
-    const c: Case = JSON.parse(await readFile(`evals/cases/${file}`, "utf8"));
-
-    const started = Date.now();
-    const t = await transcribe(c.code);
-    const ms = Date.now() - started;
-
-    const s = score(c, t);
-
-    expected += s.expected;
-    recalled += s.recalled;
-    falsePositives += s.falsePositives;
-    rawFindings += t.rawFindings;
-    dropped += t.droppedLineRefs;
-    cost += t.cost.totalUsd;
-
-    const bad = s.checks.filter((x) => !x.ok);
-    if (bad.length > 0) failedCases++;
-
-    console.log(
-      `${bad.length === 0 ? "PASS" : "FAIL"}  ${c.name.padEnd(17)}` +
-        `${t.agents.join("+") || "no specialists"}` +
-        `  ${t.findings.length} findings  ${t.verdict ?? "-"}` +
-        `  $${t.cost.totalUsd.toFixed(5)}  ${(ms / 1000).toFixed(1)}s`,
-    );
-
-    for (const check of s.checks) {
-      if (!check.ok) {
-        console.log(`        ✗ ${check.label}`);
-        if (check.detail) console.log(`          ${check.detail}`);
-      }
-    }
-    if (bad.length > 0) console.log(`        why this case exists: ${c.asserts}\n`);
-  }
-
-  const recallRate = expected === 0 ? 1 : recalled / expected;
-  const conformance = rawFindings === 0 ? 1 : 1 - dropped / (rawFindings + dropped);
+  const s = await runSuite(files, true);
 
   console.log("\n" + "─".repeat(64));
   console.log(
-    `recall              ${(recallRate * 100).toFixed(0)}%  (${recalled}/${expected} defects found)`,
+    `recall              ${(s.recall * 100).toFixed(0)}%  (of the defects the cases declare)`,
   );
   console.log(
-    `false positives     ${falsePositives}  (high-severity findings on clean code)`,
+    `false positives     ${s.falsePositives}  (high-severity findings on clean code)`,
   );
   console.log(
-    `schema conformance  ${(conformance * 100).toFixed(1)}%  (${dropped} line refs pointed nowhere)`,
+    `schema conformance  ${(s.conformance * 100).toFixed(1)}%  (line refs that pointed nowhere)`,
   );
   console.log(
-    `cost                $${cost.toFixed(5)} for ${files.length} reviews${live ? "" : " (as recorded)"}`,
+    `merged without a model  ${s.degraded}/${s.cases}  (the synthesizer failed and the fallback ran)`,
+  );
+  console.log(
+    `cost                $${s.costUsd.toFixed(5)} for ${s.cases} reviews${live ? "" : " (as recorded)"}`,
   );
   console.log("─".repeat(64));
 
@@ -309,13 +346,13 @@ async function main() {
   }
 
   const failures = [
-    failedCases > 0 && `${failedCases} case${failedCases === 1 ? "" : "s"} failed`,
-    recallRate < THRESHOLDS.recall &&
-      `recall ${(recallRate * 100).toFixed(0)}% is under the ${THRESHOLDS.recall * 100}% threshold`,
-    falsePositives > THRESHOLDS.falsePositives &&
-      `${falsePositives} false positive${falsePositives === 1 ? "" : "s"} — the budget is ${THRESHOLDS.falsePositives}`,
-    conformance < THRESHOLDS.schemaConformance &&
-      `schema conformance ${(conformance * 100).toFixed(1)}% is under the ${THRESHOLDS.schemaConformance * 100}% threshold`,
+    s.failedCases > 0 && `${s.failedCases} case${s.failedCases === 1 ? "" : "s"} failed`,
+    s.recall < THRESHOLDS.recall &&
+      `recall ${(s.recall * 100).toFixed(0)}% is under the ${THRESHOLDS.recall * 100}% threshold`,
+    s.falsePositives > THRESHOLDS.falsePositives &&
+      `${s.falsePositives} false positive${s.falsePositives === 1 ? "" : "s"} — the budget is ${THRESHOLDS.falsePositives}`,
+    s.conformance < THRESHOLDS.schemaConformance &&
+      `schema conformance ${(s.conformance * 100).toFixed(1)}% is under the ${THRESHOLDS.schemaConformance * 100}% threshold`,
   ].filter(Boolean);
 
   if (failures.length > 0) {

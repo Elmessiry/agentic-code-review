@@ -218,7 +218,15 @@ export type ReviewEvent =
     }
   | { type: "specialist_error"; specialist: Specialist; error: string }
   | { type: "synthesis_delta"; text: string }
-  | { type: "synthesis_done"; findings: SynthesizedFinding[]; verdict: Verdict }
+  | {
+      type: "synthesis_done";
+      findings: SynthesizedFinding[];
+      verdict: Verdict;
+      // True when no model merged these findings — the synthesizer failed and they were
+      // stapled together deterministically instead. It is a fact about how much the review
+      // is worth, so it travels with the review rather than living in a server log.
+      degraded: boolean;
+    }
   | { type: "done"; cost: ReviewCost; cache: CacheReport }
   | { type: "error"; error: string };
 
