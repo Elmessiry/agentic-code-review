@@ -1,4 +1,9 @@
-import { callTool, type ChatMessage, type Usage } from "@/lib/openrouter";
+import {
+  callTool,
+  OpenRouterError,
+  type ChatMessage,
+  type Usage,
+} from "@/lib/openrouter";
 import { modelFor } from "@/lib/models";
 import { sharedPrefix } from "@/lib/prompts/shared-prefix";
 import { SPECIALIST_INSTRUCTIONS } from "@/lib/prompts/specialists";
@@ -17,6 +22,16 @@ export type SpecialistFailure = {
   error: string;
 };
 
+// Every specialist run resolves to one of these — runOne never rejects. The
+// specialist's identity travels INSIDE the outcome, so nothing downstream ever has
+// to reconstruct who failed from array positions. An earlier version attributed
+// failures via index alignment between two arrays, guarded by a comment; a comment
+// is not a type, and misattributing a failure card to the wrong specialist is
+// exactly the kind of bug that survives every test that only exercises success.
+type SpecialistOutcome =
+  | { ok: true; result: SpecialistResult }
+  | { ok: false; failure: SpecialistFailure; usage: Usage };
+
 export type FanOut = {
   results: SpecialistResult[];
   failures: SpecialistFailure[];
@@ -25,8 +40,12 @@ export type FanOut = {
   inputTokens: number;
 };
 
-function messagesFor(specialist: Specialist, code: string, explicitCache: boolean) {
-  const messages: ChatMessage[] = [
+function messagesFor(
+  specialist: Specialist,
+  code: string,
+  explicitCache: boolean,
+): ChatMessage[] {
+  return [
     // The shared, cacheable prefix: rubric, then the code. Byte-identical across all
     // four specialists, which is the entire reason it is worth caching.
     { role: "system", content: sharedPrefix(code, explicitCache) },
@@ -34,90 +53,117 @@ function messagesFor(specialist: Specialist, code: string, explicitCache: boolea
     // the prefix stops being common and nothing caches.
     { role: "user", content: SPECIALIST_INSTRUCTIONS[specialist] },
   ];
-  return messages;
 }
 
-async function runOne(specialist: Specialist, code: string): Promise<SpecialistResult> {
-  const explicitCache = modelFor("specialist").caching === "explicit";
+// Total by construction: failures are caught here, where the specialist's name is in
+// scope, and returned as data. The usage on a failure is whatever the attempts were
+// billed before giving up — a specialist that died after two paid retries still spent
+// real money, and the totals below have to be able to count it.
+async function runOne(
+  specialist: Specialist,
+  code: string,
+  explicitCache: boolean,
+): Promise<SpecialistOutcome> {
+  try {
+    const { args, usage } = await callTool<{ findings: unknown }>({
+      role: "specialist",
+      messages: messagesFor(specialist, code, explicitCache),
+      tool: FINDINGS_TOOL,
+    });
 
-  const { args, usage } = await callTool<{ findings: unknown }>({
-    role: "specialist",
-    messages: messagesFor(specialist, code, explicitCache),
-    tool: FINDINGS_TOOL,
-  });
+    const { findings, dropped } = dropImpossibleLines(
+      attribute(args.findings, specialist),
+      code,
+    );
 
-  const { findings, dropped } = dropImpossibleLines(
-    attribute(args.findings, specialist),
-    code,
-  );
-
-  return { specialist, findings, usage, droppedLineRefs: dropped };
+    return {
+      ok: true,
+      result: { specialist, findings, usage, droppedLineRefs: dropped },
+    };
+  } catch (error) {
+    console.error(`[specialists] ${specialist} failed`, error);
+    return {
+      ok: false,
+      failure: {
+        specialist,
+        // The underlying error can quote the upstream body, which can quote the
+        // prompt, which is the user's code. It went to the log; the browser gets
+        // a bare fact.
+        error: "This specialist could not be reached.",
+      },
+      usage: error instanceof OpenRouterError ? error.usage : zeroUsage(),
+    };
+  }
 }
 
-// Runs the selected specialists and returns whatever came back.
+function zeroUsage(): Usage {
+  return { costUsd: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+}
+
+// Runs the selected specialists and returns whatever came back — results, failures,
+// and what ALL of it cost, including the attempts that died.
 //
-// allSettled, never all. `Promise.all` rejects the moment one promise does, which would
-// throw away three completed reviews the user has already paid for because a fourth
-// provider hiccuped. A specialist that fails is a specialist that failed — it is not an
-// outage, and the review is still worth showing.
+// The fan-out shape is a cost decision, and the right shape depends on the model's
+// caching mode (lib/models.ts):
 //
-// The fan-out shape is a cost decision, and which shape is right depends on the vendor:
+//   automatic — the cache write is free, so fire everything at once. Cold, the calls
+//   cost what no caching costs; warm, they all read. No downside to parallelism.
 //
-//   automatic caching (OpenAI, DeepSeek) — the cache write is free, so fire all four at
-//   once. Cold, they cost the same as no caching; warm, they all read. There is no
-//   downside and no reason to serialise anything.
+//   explicit — the cache write costs a premium (1.25x on the models measured). Fire
+//   four at a cold prefix and all four miss, all four write, and the review costs ~5x
+//   the prefix instead of 4x: caching has made it MORE expensive. So one specialist
+//   goes first to write the cache, and the rest fan out as readers at ~0.1x.
 //
-//   explicit caching (Anthropic) — the cache write costs a 1.25x PREMIUM. Fire four at a
-//   cold prefix and all four miss, all four write, and the review costs ~5x the prefix
-//   instead of 4x. Caching has made it MORE expensive. So the first specialist goes
-//   alone, writes the cache, and the other three then read it at ~0.1x: about 1.55x
-//   total, at the cost of one extra sequential hop of latency.
+// The warm step must actually SUCCEED before the fan-out happens. If the warmer dies
+// and the rest launch anyway, they hit a cold prefix in parallel and pay the write
+// premium three times over — the exact scenario the sequencing exists to avoid. So on
+// a failed warm the next specialist takes over as the warmer, and the parallel group
+// only launches once somebody has written the cache (or nobody is left to).
 //
-// The honest summary is that caching does not have one right answer here. It has a right
-// answer per vendor, and the shape of the code has to follow it.
+// Parallelism is Promise.all, and that is safe here for a structural reason: runOne
+// cannot reject, so there is no rejection for Promise.all to propagate. The old rule
+// of thumb — allSettled, never all — existed to stop one dead specialist taking down
+// a review the user already paid for; that guarantee now lives one level down, inside
+// runOne, where the failure can be attributed by name instead of by array position.
 export async function fanOut(specialists: Specialist[], code: string): Promise<FanOut> {
-  if (specialists.length === 0) {
-    return { results: [], failures: [], costUsd: 0, cachedTokens: 0, inputTokens: 0 };
-  }
+  const outcomes: SpecialistOutcome[] = [];
 
-  const warmFirst =
-    modelFor("specialist").caching === "explicit" && specialists.length > 1;
+  if (specialists.length > 0) {
+    // Derived once. runOne and the warm decision below must agree on the caching
+    // mode, and two independent reads of modelFor() are two places to update when a
+    // caching mode is added — the kind of pair that drifts.
+    const explicitCache = modelFor("specialist").caching === "explicit";
 
-  const settled: PromiseSettledResult<SpecialistResult>[] = [];
+    let remaining = [...specialists];
 
-  if (warmFirst) {
-    const [first, ...rest] = specialists;
-    settled.push(...(await Promise.allSettled([runOne(first, code)])));
-    settled.push(...(await Promise.allSettled(rest.map((s) => runOne(s, code)))));
-  } else {
-    settled.push(...(await Promise.allSettled(specialists.map((s) => runOne(s, code)))));
-  }
-
-  const results: SpecialistResult[] = [];
-  const failures: SpecialistFailure[] = [];
-
-  // Both branches above push in the order of `specialists` — the warm path splits it
-  // into [first, ...rest] but does not reorder it — so the index lines up either way.
-  settled.forEach((outcome, i) => {
-    if (outcome.status === "fulfilled") {
-      results.push(outcome.value);
-      return;
+    if (explicitCache) {
+      while (remaining.length > 1) {
+        const [warmer, ...rest] = remaining;
+        const outcome = await runOne(warmer, code, explicitCache);
+        outcomes.push(outcome);
+        remaining = rest;
+        if (outcome.ok) break;
+      }
     }
 
-    console.error(`[specialists] ${specialists[i]} failed`, outcome.reason);
-    failures.push({
-      specialist: specialists[i],
-      // The reason can quote the upstream body, which can quote the prompt, which is
-      // the user's code. It goes to the log; the browser gets a bare fact.
-      error: "This specialist could not be reached.",
-    });
-  });
+    outcomes.push(
+      ...(await Promise.all(remaining.map((s) => runOne(s, code, explicitCache)))),
+    );
+  }
+
+  const results = outcomes.filter((o) => o.ok).map((o) => o.result);
+  const failures = outcomes.filter((o) => !o.ok).map((o) => o.failure);
+
+  // Totals over every outcome, not just the survivors. A failed specialist's billed
+  // attempts are still spend, and the number shown to the user is only honest if it
+  // includes them.
+  const usages = outcomes.map((o) => (o.ok ? o.result.usage : o.usage));
 
   return {
     results,
     failures,
-    costUsd: results.reduce((sum, r) => sum + r.usage.costUsd, 0),
-    cachedTokens: results.reduce((sum, r) => sum + r.usage.cachedTokens, 0),
-    inputTokens: results.reduce((sum, r) => sum + r.usage.inputTokens, 0),
+    costUsd: usages.reduce((sum, u) => sum + u.costUsd, 0),
+    cachedTokens: usages.reduce((sum, u) => sum + u.cachedTokens, 0),
+    inputTokens: usages.reduce((sum, u) => sum + u.inputTokens, 0),
   };
 }
