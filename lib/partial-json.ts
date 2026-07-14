@@ -24,16 +24,37 @@
 
 export class FieldDecoder {
   private readonly key: string;
+  // The marker that means the provider has started leaking its own tool-call syntax INTO
+  // the value. See the note on `out` below.
+  private readonly stop: string;
   // Only used before the field is located: the object's head, where the key lives.
   private head = "";
   // Encoded characters that have arrived but cannot be decoded yet — at most a dangling
   // escape, waiting for the fragment that finishes it.
   private raw = "";
+  // Everything decoded so far, which is needed to find a stop marker that straddles a
+  // fragment boundary.
+  //
+  // The marker exists because of a real provider defect, caught by the eval suite rather
+  // than by reasoning. The model writes its tool call in an XML-ish parameter format and
+  // the provider serialises it to JSON badly, so a summary comes back ending:
+  //
+  //   ...nothing here breaks silently today.</summary>\n<parameter name="verdict">approve
+  //
+  // Everything after the field's own closing tag has been swallowed INTO the field, and
+  // the fields that followed it never became JSON keys at all. The same model on the same
+  // provider does it on roughly two runs in three, so it cannot be routed around and it
+  // cannot be assumed away. The value is truncated at the tag: whatever comes after it is
+  // the provider's mess, not the review, and the user must never see it.
+  private out = "";
+  // How much of `out` has already been handed to the caller.
+  private emitted = 0;
   private started = false;
   private finished = false;
 
   constructor(field: string) {
     this.key = `"${field}"`;
+    this.stop = `</${field}>`;
   }
 
   // Feed one fragment. Returns the characters it added to the field, decoded — or ""
@@ -114,8 +135,51 @@ export class FieldDecoder {
     if (text === null) return "";
 
     this.raw = complete ? "" : encoded.slice(cut);
-    if (complete) this.finished = true;
+    this.out += text;
 
-    return text;
+    // The provider has started leaking its tool-call syntax into the value. Everything
+    // from the tag onward is not part of the field.
+    const leak = this.out.indexOf(this.stop);
+    if (leak !== -1) {
+      this.out = this.out.slice(0, leak);
+      this.finished = true;
+    } else if (complete) {
+      this.finished = true;
+    }
+
+    // While the value is still open, hold back the last few characters: a stop marker
+    // split across two fragments would otherwise be half-emitted before it could be
+    // recognised, and emitted text cannot be taken back. The lag is a handful of
+    // characters and disappears the moment the field closes.
+    const safeEnd = this.finished
+      ? this.out.length
+      : Math.max(0, this.out.length - (this.stop.length - 1));
+
+    if (safeEnd <= this.emitted) return "";
+
+    const fresh = this.out.slice(this.emitted, safeEnd);
+    this.emitted = safeEnd;
+
+    return fresh;
   }
+}
+
+// Recovers fields the provider swallowed, from the value it swallowed them into.
+//
+// Same defect as the stop marker above, seen from the other end: when the leak happens,
+// the fields that came after the leaked one never become JSON keys, so `verdict` simply
+// is not there. It has not vanished, though — it is sitting in the previous field's text,
+// in the format the model actually wrote it in. Reading it back out is strictly better
+// than discarding a verdict the model did produce and falling back to a default it did
+// not choose.
+export function recoverLeakedFields(text: string): Record<string, string> {
+  const found: Record<string, string> = {};
+  const pattern = /<parameter name="([^"]+)">\s*([^<\n]*)/g;
+
+  for (const [, name, value] of text.matchAll(pattern)) {
+    const trimmed = value.trim();
+    if (trimmed.length > 0) found[name] = trimmed;
+  }
+
+  return found;
 }

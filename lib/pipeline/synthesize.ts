@@ -12,6 +12,7 @@ import {
   type Verdict,
 } from "./schema";
 import { dropImpossibleLines } from "./line-refs";
+import { recoverLeakedFields } from "@/lib/partial-json";
 
 // The last agent in the pipeline: turns four partial reviews into one.
 //
@@ -51,6 +52,19 @@ export async function synthesize(
     onDelta,
   );
 
+  // The raw summary, which is where a leaking provider hides the fields it failed to
+  // serialise. See recoverLeakedFields: when the leak happens, `verdict` is not missing —
+  // it is sitting inside the summary text, in the format the model actually wrote it in.
+  const rawSummary = typeof args.summary === "string" ? args.summary : "";
+  const leaked = recoverLeakedFields(rawSummary);
+
+  if (Object.keys(leaked).length > 0) {
+    console.warn(
+      "[synthesize] the provider leaked its tool-call syntax into the summary",
+      JSON.stringify({ recovered: Object.keys(leaked) }),
+    );
+  }
+
   // Every specialist that actually produced a report. A source outside this set is a
   // fabrication — the synthesizer crediting a finding to a lens that never ran, which
   // would put a name on the page that contradicts the failure card right next to it.
@@ -66,9 +80,16 @@ export async function synthesize(
 
   return {
     synthesis: {
-      summary: typeof args.summary === "string" ? args.summary.trim() : "",
+      // Truncated at the leak, exactly as the streamed copy was — otherwise the summary
+      // the user reads and the summary the page settles on would differ, and the page
+      // would be the one with the XML in it.
+      summary: rawSummary.split("</summary>")[0].trim(),
       findings: checked.findings,
-      verdict: validVerdict(args.verdict),
+      // The verdict the model chose, wherever it ended up: as a real JSON key, or trapped
+      // inside the summary by a provider that could not serialise its own tool call.
+      // Defaulting to changes_requested is the right thing to do when there is no verdict;
+      // it is the wrong thing to do when there is one and we simply did not look.
+      verdict: validVerdict(args.verdict ?? leaked.verdict),
     },
     usage,
   };
@@ -140,6 +161,10 @@ function validVerdict(raw: unknown): Verdict {
 
   if (typeof raw === "string" && verdicts.has(raw)) return raw as Verdict;
 
+  // Seen live: the synthesizer closed its object without ever writing `verdict`, despite
+  // the field being required by the schema. `required` is a strong hint to a model, not a
+  // guarantee — so log what it DID send, because "undefined" alone tells you nothing about
+  // which field went missing or why.
   console.warn("[synthesize] verdict outside the schema", JSON.stringify({ raw }));
   return "changes_requested";
 }
