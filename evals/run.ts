@@ -1,5 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { runReview } from "@/lib/pipeline/review";
+import { CANDIDATES, ENV_OVERRIDE } from "@/lib/models";
+import type { Role } from "@/lib/models";
 import { SEVERITIES } from "@/lib/pipeline/schema";
 import type {
   ReviewCost,
@@ -18,9 +20,10 @@ import type { Case, FindingExpectation } from "./types";
 // suite carries a false-positive budget, and the clean case — code that is genuinely fine
 // — is the one whose result matters most. Zero high-severity findings, or the run fails.
 //
-//   npm run eval             replay recorded calls (free, deterministic; CI runs this)
-//   npm run eval -- --live   hit the real API
-//   npm run eval -- --record hit the real API and save the responses as fixtures
+//   npm run eval                       replay recorded calls (free; CI runs this)
+//   npm run eval -- --live             hit the real API
+//   npm run eval -- --record           hit the real API and save the responses as fixtures
+//   npm run eval -- --matrix=<role>    score every candidate model for one role, live
 
 const THRESHOLDS = {
   recall: 0.8,
@@ -301,10 +304,99 @@ async function runSuite(files: string[], report: boolean): Promise<Suite> {
   };
 }
 
+// Scores every candidate model for one role and prints the comparison table that picks the
+// default. One role varies; the override env var is set to each candidate in turn and the
+// whole suite runs against it, while the other two roles hold at their defaults.
+//
+// This runs live, always — see main(). A matrix over replayed fixtures would hand every
+// candidate the same recorded response and score them all identically, which is the exact
+// bug this mode was rebuilt to remove: the fixture, not the model, would decide the winner.
+async function matrix(role: Role, files: string[]): Promise<void> {
+  const env = ENV_OVERRIDE[role];
+  const restore = process.env[env];
+
+  const rows: { id: string; suite: Suite }[] = [];
+
+  try {
+    for (const id of CANDIDATES[role]) {
+      process.env[env] = id;
+      console.log(`▶ ${role} = ${id}`);
+      rows.push({ id, suite: await runSuite(files, false) });
+    }
+  } finally {
+    // Leave the environment as it was found — a matrix run must not change what a plain
+    // `npm run eval` afterwards resolves the role to. In `finally`, so a candidate that
+    // throws mid-sweep cannot leak its override into whatever runs next.
+    if (restore === undefined) delete process.env[env];
+    else process.env[env] = restore;
+  }
+
+  const w = Math.max(...rows.map((r) => r.id.length), "model".length);
+  const head =
+    `${"model".padEnd(w)}   pass  recall  falsePos  conform  merged  ` +
+    `      cost   time`;
+  console.log("\n" + "─".repeat(head.length));
+  console.log(head);
+  console.log("─".repeat(head.length));
+
+  for (const { id, suite: s } of rows) {
+    // The pass column is the gate, and it comes FIRST for a reason paid for in real money:
+    // a candidate can post 100% recall, zero false positives and perfect conformance and
+    // still fail the suite, because those three miss a wrong verdict on clean code — the
+    // flagship anti-hallucination case. A table that hid the pass count once recommended a
+    // model that failed exactly that. Recall and cost only decide among candidates that pass.
+    const passed = s.cases - s.failedCases;
+    console.log(
+      `${id.padEnd(w)}  ` +
+        `${`${passed}/${s.cases}`.padStart(5)}  ` +
+        `${`${(s.recall * 100).toFixed(0)}%`.padStart(6)}  ` +
+        `${String(s.falsePositives).padStart(8)}  ` +
+        `${`${(s.conformance * 100).toFixed(0)}%`.padStart(7)}  ` +
+        `${`${s.degraded}/${s.cases}`.padStart(6)}  ` +
+        `$${s.costUsd.toFixed(5)}  ` +
+        `${`${s.seconds.toFixed(0)}s`.padStart(5)}`,
+    );
+  }
+  console.log("─".repeat(head.length));
+  console.log(
+    `\npass is the gate: only candidates that clear every case are eligible. ` +
+      `among those, cost decides. the first row is the current default.`,
+  );
+}
+
+function parseMatrixRole(args: string[]): Role | null {
+  const flag = args.find((a) => a.startsWith("--matrix"));
+  if (!flag) return null;
+
+  const role = flag.split("=")[1];
+  if (role === "planner" || role === "specialist" || role === "synthesizer") return role;
+
+  console.error(
+    `--matrix needs a role: --matrix=planner | --matrix=specialist | --matrix=synthesizer`,
+  );
+  process.exit(1);
+}
+
 async function main() {
   const args = process.argv.slice(2);
+  const matrixRole = parseMatrixRole(args);
   const recording = args.includes("--record");
-  const live = recording || args.includes("--live");
+  // The matrix compares real models on real cost and latency, so it is always live: there
+  // is nothing to compare in a fixture that already fixed the answer.
+  const live = recording || args.includes("--live") || matrixRole !== null;
+
+  // One source for which cases run, shared by the matrix sweep and the ordinary suite — so
+  // the two can never disagree about what "the suite" is. readdir does no network, so it is
+  // safe to run before the cassette below intercepts fetch.
+  const files = (await readdir("evals/cases")).filter((f) => f.endsWith(".json")).sort();
+
+  if (matrixRole) {
+    console.log(
+      `scoring ${CANDIDATES[matrixRole].length} candidates for ${matrixRole}, live\n`,
+    );
+    await matrix(matrixRole, files);
+    return;
+  }
 
   let save: (() => Promise<number>) | null = null;
 
@@ -317,8 +409,6 @@ async function main() {
   } else {
     console.log("running live against the real API\n");
   }
-
-  const files = (await readdir("evals/cases")).filter((f) => f.endsWith(".json")).sort();
 
   const s = await runSuite(files, true);
 

@@ -99,15 +99,58 @@ const DEFAULTS: Record<Role, ModelId> = {
   // schema wins, and it is ~20x cheaper than the obvious Haiku answer.
   planner: "openai/gpt-5-nano",
   specialist: "openai/gpt-5-mini",
-  // The hardest job: reconcile contradictory findings and write prose a human
-  // will read. Worth paying for, at least until the matrix says otherwise.
+  // The hardest job: reconcile contradictory findings and write prose a human will
+  // read. The matrix chose this, and did not choose the cheapest. Every candidate
+  // tied on recall, false positives and conformance, so cost looked decisive — until
+  // the clean case, run repeatedly, exposed a flake the averages hid: on genuinely
+  // fine code, gpt-5-mini approved 1 run in 5 and grok-4.3 4 in 5, both blocking a
+  // merge over low-severity notes, where Sonnet approved every time. The clean
+  // anti-hallucination verdict is the case that matters most, so the model that holds
+  // it wins even at 2x the price. See the matrix table in the README.
   synthesizer: "anthropic/claude-sonnet-5",
 };
 
-const ENV_OVERRIDE: Record<Role, string> = {
+export const ENV_OVERRIDE: Record<Role, string> = {
   planner: "OPENROUTER_MODEL_PLANNER",
   specialist: "OPENROUTER_MODEL_SPECIALIST",
   synthesizer: "OPENROUTER_MODEL_SYNTHESIZER",
+};
+
+// The models the eval matrix scores for each role. This list lives here, not in the
+// harness, for the same reason as everything else in this file: the harness is not
+// allowed to name a model. It sweeps roles and ids abstractly, and the ids it is handed
+// come from here.
+//
+// Every entry MUST be a key of MODELS — modelFor throws on an unknown override, and that
+// is deliberate: it makes the matrix scoring the default under a typo impossible. The
+// first id in each list is the current default, so the table always shows the incumbent
+// next to its challengers.
+//
+// One role varies at a time; the other two are held constant at whatever they already
+// resolve to (a default, or an env override if one is set). That isolates the candidate's
+// effect — a specialist sweep where the synthesizer also changed would score two variables
+// and attribute the difference to one.
+export const CANDIDATES: Record<Role, ModelId[]> = {
+  // Routing is classification. The question is whether the cheapest model that can hold a
+  // schema routes as well as the ones that cost 20x — Haiku is here as the spec's original
+  // answer, to be measured rather than assumed.
+  planner: ["openai/gpt-5-nano", "openai/gpt-5-mini", "anthropic/claude-haiku-4.5"],
+  // Real code reasoning under a forced schema, run 2-4x per review, so price matters most
+  // here. deepseek-v4-pro is the interesting one: near-free cache reads.
+  specialist: [
+    "openai/gpt-5-mini",
+    "deepseek/deepseek-v4-pro",
+    "z-ai/glm-4.7",
+    "anthropic/claude-sonnet-5",
+  ],
+  // The hardest job and the most expensive call in the pipeline. grok-4.3 has unusually
+  // cheap output for a prose-heavy task; the question is whether it holds the schema.
+  synthesizer: [
+    "anthropic/claude-sonnet-5",
+    "x-ai/grok-4.3",
+    "openai/gpt-5-mini",
+    "deepseek/deepseek-v4-pro",
+  ],
 };
 
 // Resolves the model for a role, letting an env var override the default. The

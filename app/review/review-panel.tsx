@@ -5,6 +5,8 @@ import dynamic from "next/dynamic";
 import PlanCard, { type PlanResult } from "./plan-card";
 import FindingsPanel, { type SpecialistNode } from "./findings-panel";
 import VerdictCard from "./verdict-card";
+import PipelineGraph from "./pipeline-graph";
+import { EXAMPLES } from "./examples";
 import { sseEvents } from "@/lib/sse";
 import type {
   CacheReport,
@@ -174,89 +176,112 @@ export default function ReviewPanel() {
   }
 
   return (
-    <div className="grid gap-6 lg:grid-cols-2">
-      <section className="flex flex-col gap-3">
-        <div className="flex items-baseline justify-between">
-          <h2 className="text-muted text-sm font-medium">Code</h2>
-          <span className="text-muted text-xs">{code.split("\n").length} lines</span>
-        </div>
+    <div className="flex flex-col gap-6">
+      <PipelineGraph
+        status={status}
+        plan={plan}
+        nodes={nodes}
+        summary={summary}
+        findings={findings}
+      />
 
-        <div className="border-border bg-surface overflow-hidden rounded-lg border">
-          <CodeEditor value={code} onChange={setCode} disabled={busy} />
-        </div>
-
-        <button
-          onClick={run}
-          disabled={busy || code.trim().length === 0}
-          className="bg-accent text-canvas self-start rounded-md px-4 py-2 text-sm font-medium transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {busy ? "Reviewing…" : "Review"}
-        </button>
-
-        {cost && cache && (
-          // The cost and the cache hit rate are the argument this project is making.
-          // They belong on the page, not in a log nobody opens.
-          <dl className="border-border text-muted mt-1 grid grid-cols-2 gap-x-4 gap-y-1 rounded-lg border border-dashed p-3 text-xs">
-            <dt>Cost</dt>
-            <dd className="text-ink text-right font-mono">${cost.totalUsd.toFixed(5)}</dd>
-            <dt className="pl-3">plan · specialists · synthesis</dt>
-            <dd className="text-muted text-right font-mono">
-              {cost.planUsd.toFixed(5)} · {cost.specialistsUsd.toFixed(5)} ·{" "}
-              {cost.synthesisUsd.toFixed(5)}
-            </dd>
-            <dt>Cache ({cache.mode})</dt>
-            <dd className="text-ink text-right font-mono">
-              {(cache.hitRate * 100).toFixed(0)}% of {cache.inputTokens.toLocaleString()}{" "}
-              tok
-            </dd>
-            <dt>Shared prefix</dt>
-            <dd className="text-ink text-right font-mono">
-              {cache.prefixTokens.toLocaleString()} tok{" "}
-              {cache.clearsFloor ? "✓" : "— under floor, caching off"}
-            </dd>
-          </dl>
-        )}
-      </section>
-
-      <section className="flex flex-col gap-3">
-        <h2 className="text-muted text-sm font-medium">Review</h2>
-
-        <div aria-live="polite" className="flex flex-col gap-3">
-          {plan && <PlanCard plan={plan} />}
-
-          {status === "idle" && (
-            <div className="border-border bg-surface text-muted min-h-[280px] rounded-lg border p-4 text-sm">
-              Paste code and press Review. A planner picks which specialists the code
-              needs, they read it in parallel through one lens each, and a synthesizer
-              merges what they found — resolving the places they disagree — into a single
-              verdict.
+      <div className="grid gap-6 lg:grid-cols-2">
+        <section className="flex flex-col gap-3">
+          <div className="flex items-baseline justify-between gap-3">
+            <h2 className="text-muted text-sm font-medium">Code</h2>
+            <div className="flex items-center gap-1.5">
+              {EXAMPLES.map((example) => (
+                <button
+                  key={example.id}
+                  onClick={() => setCode(example.code)}
+                  disabled={busy}
+                  className="border-border text-muted hover:text-ink hover:border-accent/50 rounded-md border px-2 py-1 text-xs transition disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {example.label}
+                </button>
+              ))}
             </div>
-          )}
+          </div>
 
-          {busy && !plan && (
-            <div className="border-border bg-surface text-muted min-h-[120px] animate-pulse rounded-lg border p-4 text-sm">
-              Planning…
-            </div>
-          )}
+          <div className="border-border bg-surface overflow-hidden rounded-lg border">
+            <CodeEditor value={code} onChange={setCode} disabled={busy} />
+          </div>
 
-          {status === "error" && (
-            <div className="border-border bg-surface text-high rounded-lg border p-4 text-sm">
-              {error}
-            </div>
-          )}
+          <button
+            onClick={run}
+            disabled={busy || code.trim().length === 0}
+            className="bg-accent text-canvas self-start rounded-md px-4 py-2 text-sm font-medium transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {busy ? "Reviewing…" : "Review"}
+          </button>
 
-          {(summary.length > 0 || findings) && (
-            <VerdictCard
-              summary={summary}
-              findings={findings}
-              verdict={verdict}
-              streaming={synthesizing}
-            />
+          {cost && cache && (
+            // The cost and the cache hit rate are the argument this project is making.
+            // They belong on the page, not in a log nobody opens.
+            <dl className="border-border text-muted mt-1 grid grid-cols-2 gap-x-4 gap-y-1 rounded-lg border border-dashed p-3 text-xs">
+              <dt>Cost</dt>
+              <dd className="text-ink text-right font-mono">
+                ${cost.totalUsd.toFixed(5)}
+              </dd>
+              <dt className="pl-3">plan · specialists · synthesis</dt>
+              <dd className="text-muted text-right font-mono">
+                {cost.planUsd.toFixed(5)} · {cost.specialistsUsd.toFixed(5)} ·{" "}
+                {cost.synthesisUsd.toFixed(5)}
+              </dd>
+              <dt>Cache ({cache.mode})</dt>
+              <dd className="text-ink text-right font-mono">
+                {(cache.hitRate * 100).toFixed(0)}% of{" "}
+                {cache.inputTokens.toLocaleString()} tok
+              </dd>
+              <dt>Shared prefix</dt>
+              <dd className="text-ink text-right font-mono">
+                {cache.prefixTokens.toLocaleString()} tok{" "}
+                {cache.clearsFloor ? "✓" : "— under floor, caching off"}
+              </dd>
+            </dl>
           )}
+        </section>
 
-          <FindingsPanel nodes={nodes} />
-        </div>
-      </section>
+        <section className="flex flex-col gap-3">
+          <h2 className="text-muted text-sm font-medium">Review</h2>
+
+          <div aria-live="polite" className="flex flex-col gap-3">
+            {plan && <PlanCard plan={plan} />}
+
+            {status === "idle" && (
+              <div className="border-border bg-surface text-muted min-h-[280px] rounded-lg border p-4 text-sm">
+                Paste code and press Review. A planner picks which specialists the code
+                needs, they read it in parallel through one lens each, and a synthesizer
+                merges what they found — resolving the places they disagree — into a
+                single verdict.
+              </div>
+            )}
+
+            {busy && !plan && (
+              <div className="border-border bg-surface text-muted min-h-[120px] animate-pulse rounded-lg border p-4 text-sm">
+                Planning…
+              </div>
+            )}
+
+            {status === "error" && (
+              <div className="border-border bg-surface text-high rounded-lg border p-4 text-sm">
+                {error}
+              </div>
+            )}
+
+            {(summary.length > 0 || findings) && (
+              <VerdictCard
+                summary={summary}
+                findings={findings}
+                verdict={verdict}
+                streaming={synthesizing}
+              />
+            )}
+
+            <FindingsPanel nodes={nodes} />
+          </div>
+        </section>
+      </div>
     </div>
   );
 }
