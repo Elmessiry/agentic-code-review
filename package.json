@@ -15,7 +15,7 @@
     "typecheck": "tsc --noEmit",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
-    "test:unit": "node --import tsx --test 'lib/**/*.test.ts'",
+    "test:unit": "node --import tsx --test 'lib/**/*.test.ts' 'app/**/*.test.ts'",
     "eval": "node --env-file-if-exists=.env.local --import tsx evals/run.ts"
   },
   "dependencies": {

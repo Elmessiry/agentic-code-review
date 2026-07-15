@@ -24,6 +24,35 @@ body {
   color: var(--color-ink);
 }
 
+/* The one moving part in the pipeline graph: a highlight travelling along the
+   connector that feeds the stage currently running. Everything else is static, so
+   this reads as flow rather than a page-wide loading shimmer. */
+@keyframes pipeline-flow {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: 0 0;
+  }
+}
+.pipeline-flow {
+  background-image: linear-gradient(90deg, transparent, var(--color-accent), transparent);
+  background-size: 200% 100%;
+  animation: pipeline-flow 1.2s linear infinite;
+}
+
+/* Motion is a flourish here, never information — every stage state is also carried by
+   colour and a label. So a viewer who asked for less of it loses nothing. */
+@media (prefers-reduced-motion: reduce) {
+  .pipeline-flow {
+    animation: none;
+    background: var(--color-accent);
+  }
+  .animate-pulse {
+    animation: none;
+  }
+}
+
 /* CodeMirror sets its own background; this keeps it flush with the surface it
    sits on instead of floating a slightly-wrong dark grey inside our panel. */
 .cm-editor {
