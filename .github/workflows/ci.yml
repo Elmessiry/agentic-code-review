@@ -26,6 +26,12 @@ jobs:
       # has leaked into the wrong scope.
       - run: npm run build
 
+      # Unit tests for the pure pipeline stages that never call a model — the
+      # deterministic merge in particular, which is the synthesizer's fallback and the one
+      # stage the replayed eval suite cannot reach (it only runs when a live synthesizer
+      # returns unparseable JSON, which no fixture reproduces).
+      - run: npm run test:unit
+
       # The eval suite, replayed from recorded fixtures: no network, no key, no spend,
       # and the same answer every time. This scores the PIPELINE — routing, the tripwire,
       # the merge, the line validation, the verdict, the totals — which is the part that

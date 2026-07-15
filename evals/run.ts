@@ -292,7 +292,7 @@ async function runSuite(files: string[], report: boolean): Promise<Suite> {
   return {
     recall: expected === 0 ? 1 : recalled / expected,
     falsePositives,
-    conformance: rawFindings === 0 ? 1 : 1 - dropped / (rawFindings + dropped),
+    conformance: rawFindings + dropped === 0 ? 1 : 1 - dropped / (rawFindings + dropped),
     costUsd: cost,
     seconds: (Date.now() - started) / 1000,
     degraded,

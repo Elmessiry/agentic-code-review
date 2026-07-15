@@ -22,11 +22,18 @@
 // ever-growing buffer: the decoder is fed each fragment as it arrives, so the work is
 // linear in the length of the field rather than quadratic in the number of chunks.
 
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export class FieldDecoder {
   private readonly key: string;
-  // The marker that means the provider has started leaking its own tool-call syntax INTO
-  // the value. See the note on `out` below.
+  // The field's own closing tag — `</summary>`. On its own it is not a leak: prose can
+  // contain it (a review of HTML that names the element). See the note on `out` below.
   private readonly stop: string;
+  // The signature of an actual leak: the closing tag followed by the next parameter block,
+  // `</summary>\s*<parameter`. This, not a bare tag, is what truncates the value.
+  private readonly leak: RegExp;
   // Only used before the field is located: the object's head, where the key lives.
   private head = "";
   // Encoded characters that have arrived but cannot be decoded yet — at most a dangling
@@ -55,6 +62,7 @@ export class FieldDecoder {
   constructor(field: string) {
     this.key = `"${field}"`;
     this.stop = `</${field}>`;
+    this.leak = new RegExp(`${escapeRe(this.stop)}\\s*<parameter`);
   }
 
   // Feed one fragment. Returns the characters it added to the field, decoded — or ""
@@ -137,9 +145,12 @@ export class FieldDecoder {
     this.raw = complete ? "" : encoded.slice(cut);
     this.out += text;
 
-    // The provider has started leaking its tool-call syntax into the value. Everything
-    // from the tag onward is not part of the field.
-    const leak = this.out.indexOf(this.stop);
+    // The provider has started leaking its tool-call syntax into the value: it closes the
+    // field's own tag and opens the next parameter block, all inside the string —
+    // `</summary>\n<parameter name="verdict">approve`. Everything from that tag onward is
+    // the provider's mess, not the review. A BARE `</summary>` is deliberately not this: it
+    // is ordinary prose (a review of HTML that names the element) and must not truncate.
+    const leak = this.out.search(this.leak);
     if (leak !== -1) {
       this.out = this.out.slice(0, leak);
       this.finished = true;
@@ -147,13 +158,15 @@ export class FieldDecoder {
       this.finished = true;
     }
 
-    // While the value is still open, hold back the last few characters: a stop marker
-    // split across two fragments would otherwise be half-emitted before it could be
-    // recognised, and emitted text cannot be taken back. The lag is a handful of
-    // characters and disappears the moment the field closes.
+    // While the value is still open, hold back any trailing run that could still grow into
+    // the leak marker across the next fragment — a partial `</summary>`, the whole tag, or
+    // the tag plus whitespace plus a partial `<parameter`. Emitting it and then finding the
+    // leak next fragment would flash the provider's XML to the browser, and emitted text
+    // cannot be taken back. An innocent tail is released the moment a non-matching
+    // character arrives, or when the field closes.
     const safeEnd = this.finished
       ? this.out.length
-      : Math.max(0, this.out.length - (this.stop.length - 1));
+      : this.out.length - this.suspiciousSuffix();
 
     if (safeEnd <= this.emitted) return "";
 
@@ -162,6 +175,44 @@ export class FieldDecoder {
 
     return fresh;
   }
+
+  // The length of the longest suffix of `out` that could still become the leak marker
+  // `</summary>\s*<parameter` as more fragments arrive. A confirmed leak is handled before
+  // this runs; this is only the not-yet-decidable tail.
+  private suspiciousSuffix(): number {
+    const scan = Math.min(this.out.length, this.stop.length + 32);
+
+    for (let k = scan; k >= 1; k--) {
+      const tail = this.out.slice(this.out.length - k);
+
+      // A prefix of the closing tag (or the whole tag), still waiting to see what follows.
+      if (tail.length <= this.stop.length) {
+        if (this.stop.startsWith(tail)) return k;
+        continue;
+      }
+
+      // The whole tag, then whitespace, then a partial `<parameter`.
+      if (!tail.startsWith(this.stop)) continue;
+      const after = tail.slice(this.stop.length).replace(/^\s*/, "");
+      if ("<parameter".startsWith(after)) return k;
+    }
+
+    return 0;
+  }
+}
+
+// Splits a decoded field value at the leak boundary. `clean` is the real value; `leaked`
+// is the tool-call syntax the provider swallowed into it (empty when there was no leak).
+// The boundary is the same signature FieldDecoder truncates the stream at, so the settled
+// value and the streamed one agree to the character. A bare `</summary>` is left untouched.
+export function splitLeak(
+  value: string,
+  field: string,
+): { clean: string; leaked: string } {
+  const i = value.search(new RegExp(`</${escapeRe(field)}>\\s*<parameter`));
+  return i === -1
+    ? { clean: value, leaked: "" }
+    : { clean: value.slice(0, i), leaked: value.slice(i) };
 }
 
 // Recovers fields the provider swallowed, from the value it swallowed them into.

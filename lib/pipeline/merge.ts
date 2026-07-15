@@ -66,7 +66,7 @@ export function mergeDeterministically(
       sources,
       ...(group.length > 1
         ? {
-            note: `${sources.length > 1 ? sources.length : group.length} findings on this line were combined without a model, so the wording is one specialist's and the severity is the highest anyone gave it.`,
+            note: `${group.length} findings on this line were combined without a model, so the wording is one specialist's and the severity is the highest anyone gave it.`,
           }
         : {}),
     });

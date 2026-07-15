@@ -12,7 +12,7 @@ import {
   type Verdict,
 } from "./schema";
 import { dropImpossibleLines } from "./line-refs";
-import { recoverLeakedFields } from "@/lib/partial-json";
+import { recoverLeakedFields, splitLeak } from "@/lib/partial-json";
 
 // The last agent in the pipeline: turns four partial reviews into one.
 //
@@ -52,11 +52,14 @@ export async function synthesize(
     onDelta,
   );
 
-  // The raw summary, which is where a leaking provider hides the fields it failed to
-  // serialise. See recoverLeakedFields: when the leak happens, `verdict` is not missing —
-  // it is sitting inside the summary text, in the format the model actually wrote it in.
+  // A leaking provider closes the summary's own tag and dumps the fields it failed to
+  // serialise after it, inside the string. Split there: `clean` is the summary the user
+  // should read, `leaked` is the swallowed tail where a verdict may be hiding. Recovering
+  // only from the tail — not from the whole summary — keeps a `<parameter …>` that appeared
+  // in reviewed code, quoted back in the prose, from being misread as a real leaked field.
   const rawSummary = typeof args.summary === "string" ? args.summary : "";
-  const leaked = recoverLeakedFields(rawSummary);
+  const { clean: cleanSummary, leaked: leakedTail } = splitLeak(rawSummary, "summary");
+  const leaked = recoverLeakedFields(leakedTail);
 
   if (Object.keys(leaked).length > 0) {
     console.warn(
@@ -83,7 +86,7 @@ export async function synthesize(
       // Truncated at the leak, exactly as the streamed copy was — otherwise the summary
       // the user reads and the summary the page settles on would differ, and the page
       // would be the one with the XML in it.
-      summary: rawSummary.split("</summary>")[0].trim(),
+      summary: cleanSummary.trim(),
       findings: checked.findings,
       // The verdict the model chose, wherever it ended up: as a real JSON key, or trapped
       // inside the summary by a provider that could not serialise its own tool call.
