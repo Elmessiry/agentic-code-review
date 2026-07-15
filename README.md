@@ -137,6 +137,50 @@ before the others fan out; if it dies, the next specialist takes over as the war
 Fanning out behind a failed warmer would send three parallel writes at a cold prefix —
 the exact cost inversion the sequencing exists to avoid.
 
+### A failed synthesizer degrades the review, it does not end it
+
+The synthesizer is the one call every review depends on, and models do not always return
+usable structured output: a forced tool call can come back as prose, or as JSON with a
+stray byte on the end, or with a field the provider swallowed into the wrong place. When
+the synthesizer's output cannot be used, the findings are merged **without a model** —
+grouped by line, worst severity wins, sources unioned — and the review says plainly that a
+machine combined it rather than a model. The fallback never returns `reject`, because
+deciding a defect is exploitable rather than merely present is a judgement that counting
+severities cannot make.
+
+The tool-call payload is treated as untrusted, the same as the pasted code. Trailing
+garbage is trimmed before the parse is given up on; a verdict the provider serialised into
+the summary text is read back out of it; and a provider that leaks its own `<parameter …>`
+tags into a streamed field has them stripped before they reach the browser.
+
+### The eval harness scores the pipeline, not the prose
+
+`npm run eval` runs six cases with structured assertions and a false-positive budget.
+Assertions match the **mechanism** — `concatenat|parameteri`, not "SQL injection" — because
+a review that says "there is no SQL injection here" contains the label too, and matching
+free text grades vocabulary instead of correctness.
+
+Recall alone is not enough: a reviewer that flags every line has perfect recall and is
+useless. The case that carries the most weight is the **clean** one, where the correct
+number of high-severity findings is zero. A prompt-injection case asserts the verdict does
+not flip when the code tells the reviewer to approve it, and a conflict case asserts that
+one defect comes back carrying **two independent sources** — the only corroborating signal
+the pipeline produces.
+
+|                    | result    |
+| ------------------ | --------- |
+| recall             | **100%**  |
+| false positives    | **0**     |
+| schema conformance | **100%**  |
+| cost, six reviews  | **$0.10** |
+
+CI replays recorded fixtures — free, deterministic, keyed by a hash of the request — so it
+scores the routing, the tripwire, the merge, the line validation and the totals without
+spending a cent or turning red because a model phrased something differently. Whether the
+models themselves still behave is a separate question that needs the live API, so it runs
+on a nightly job instead of on every push. A changed prompt misses the fixtures loudly and
+says to re-record, rather than serving a stale answer to a request that no longer matches.
+
 ### Caching is not one primitive, and it changes the architecture
 
 The obvious move is to cache each specialist's system prompt, since those repeat every
@@ -213,20 +257,19 @@ costs a fraction of a cent. Every false negative it prevents costs a CVE.
 
 ## What doesn't exist yet
 
-The pipeline visualisation, the eval harness, the rate limit and the spend cap. This
-section shrinks as they land.
+A per-IP rate limit and a daily spend cap, and the deploy behind them. This section shrinks
+as they land.
 
 ```
 today:  guard → tripwire → plan → specialists (parallel) → synthesize → stream
-next:   an eval harness that scores it, and a model matrix that picks the models
+next:   a rate limit and a real-dollar spend cap, then a public deploy
 ```
 
-The models are still chosen by argument rather than by measurement, and the cost table
-above says exactly where that hurts: 70% of every review is one call to the most expensive
-model in the registry. The eval harness scores candidates on recall, false-positive rate,
-schema conformance, latency and real cost — and whatever it picks replaces the defaults in
-`lib/models.ts`. "My eval harness told me which model to use" is a different claim from "I
-read that this one is good."
+The default model for each role is still chosen by argument rather than measurement, and
+the cost table above shows where that hurts: 70% of every review is one call to the most
+expensive model in the registry. The harness can score alternatives for a role through env
+overrides without touching code, so replacing those defaults with measured winners is the
+next thing it is pointed at.
 
 ## Design notes
 
@@ -259,17 +302,22 @@ cp .env.example .env.local   # add your OPENROUTER_API_KEY
 npm run dev
 ```
 
-Set a hard spend limit on the key in the OpenRouter dashboard. The app will enforce
-its own daily cap, but a provider-enforced ceiling is the one a bug in the app
-cannot get past.
+Set a hard spend limit on the key in the OpenRouter dashboard. It is the ceiling a bug in
+this app cannot get past, and until the app-level daily cap lands (see above) it is the
+only one.
 
 ## Testing
 
 ```bash
 npm run lint && npm run typecheck && npm run format:check && npm run build
+npm run eval        # replays recorded fixtures — no key, no network, no spend
 ```
 
-CI runs all four on every push and PR. The build runs **without** an API key on
-purpose: the key is read inside the request handler, not at module load, so a
-missing key can never break a build. If that step ever starts needing the secret, a
-key read has escaped into module scope.
+CI runs all of these on every push and PR. The build runs **without** an API key on
+purpose: the key is read inside the request handler, not at module load, so a missing key
+can never break a build. If that step ever starts needing the secret, a key read has
+escaped into module scope.
+
+`npm run eval -- --live` runs the same cases against the real API, and `--record` refreshes
+the fixtures after a prompt or model change. The live pass runs on a nightly schedule so
+model drift is caught without putting a paid, nondeterministic call in front of every push.

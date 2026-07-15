@@ -1,0 +1,16 @@
+{
+  "name": "n-plus-one",
+  "asserts": "A query per iteration inside a loop. Performance must run and must anchor the finding to the awaited call, not to the loop header — the fix goes where the round trip is.",
+  "code": "async function loadProfiles(userIds) {\n  const profiles = [];\n  for (const id of userIds) {\n    const user = await db.findUser(id);\n    profiles.push(user);\n  }\n  return profiles;\n}\n",
+  "expect": {
+    "agents": { "include": ["performance"] },
+    "findings": [
+      {
+        "what": "one round trip per iteration",
+        "line": 4,
+        "by": "performance",
+        "match": "loop|sequential|round trip|N\\+1|Promise\\.all|batch|one query per"
+      }
+    ]
+  }
+}

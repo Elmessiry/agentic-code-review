@@ -22,18 +22,47 @@
 // ever-growing buffer: the decoder is fed each fragment as it arrives, so the work is
 // linear in the length of the field rather than quadratic in the number of chunks.
 
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export class FieldDecoder {
   private readonly key: string;
+  // The field's own closing tag — `</summary>`. On its own it is not a leak: prose can
+  // contain it (a review of HTML that names the element). See the note on `out` below.
+  private readonly stop: string;
+  // The signature of an actual leak: the closing tag followed by the next parameter block,
+  // `</summary>\s*<parameter`. This, not a bare tag, is what truncates the value.
+  private readonly leak: RegExp;
   // Only used before the field is located: the object's head, where the key lives.
   private head = "";
   // Encoded characters that have arrived but cannot be decoded yet — at most a dangling
   // escape, waiting for the fragment that finishes it.
   private raw = "";
+  // Everything decoded so far, which is needed to find a stop marker that straddles a
+  // fragment boundary.
+  //
+  // The marker exists because of a real provider defect, caught by the eval suite rather
+  // than by reasoning. The model writes its tool call in an XML-ish parameter format and
+  // the provider serialises it to JSON badly, so a summary comes back ending:
+  //
+  //   ...nothing here breaks silently today.</summary>\n<parameter name="verdict">approve
+  //
+  // Everything after the field's own closing tag has been swallowed INTO the field, and
+  // the fields that followed it never became JSON keys at all. The same model on the same
+  // provider does it on roughly two runs in three, so it cannot be routed around and it
+  // cannot be assumed away. The value is truncated at the tag: whatever comes after it is
+  // the provider's mess, not the review, and the user must never see it.
+  private out = "";
+  // How much of `out` has already been handed to the caller.
+  private emitted = 0;
   private started = false;
   private finished = false;
 
   constructor(field: string) {
     this.key = `"${field}"`;
+    this.stop = `</${field}>`;
+    this.leak = new RegExp(`${escapeRe(this.stop)}\\s*<parameter`);
   }
 
   // Feed one fragment. Returns the characters it added to the field, decoded — or ""
@@ -114,8 +143,94 @@ export class FieldDecoder {
     if (text === null) return "";
 
     this.raw = complete ? "" : encoded.slice(cut);
-    if (complete) this.finished = true;
+    this.out += text;
 
-    return text;
+    // The provider has started leaking its tool-call syntax into the value: it closes the
+    // field's own tag and opens the next parameter block, all inside the string —
+    // `</summary>\n<parameter name="verdict">approve`. Everything from that tag onward is
+    // the provider's mess, not the review. A BARE `</summary>` is deliberately not this: it
+    // is ordinary prose (a review of HTML that names the element) and must not truncate.
+    const leak = this.out.search(this.leak);
+    if (leak !== -1) {
+      this.out = this.out.slice(0, leak);
+      this.finished = true;
+    } else if (complete) {
+      this.finished = true;
+    }
+
+    // While the value is still open, hold back any trailing run that could still grow into
+    // the leak marker across the next fragment — a partial `</summary>`, the whole tag, or
+    // the tag plus whitespace plus a partial `<parameter`. Emitting it and then finding the
+    // leak next fragment would flash the provider's XML to the browser, and emitted text
+    // cannot be taken back. An innocent tail is released the moment a non-matching
+    // character arrives, or when the field closes.
+    const safeEnd = this.finished
+      ? this.out.length
+      : this.out.length - this.suspiciousSuffix();
+
+    if (safeEnd <= this.emitted) return "";
+
+    const fresh = this.out.slice(this.emitted, safeEnd);
+    this.emitted = safeEnd;
+
+    return fresh;
   }
+
+  // The length of the longest suffix of `out` that could still become the leak marker
+  // `</summary>\s*<parameter` as more fragments arrive. A confirmed leak is handled before
+  // this runs; this is only the not-yet-decidable tail.
+  private suspiciousSuffix(): number {
+    const scan = Math.min(this.out.length, this.stop.length + 32);
+
+    for (let k = scan; k >= 1; k--) {
+      const tail = this.out.slice(this.out.length - k);
+
+      // A prefix of the closing tag (or the whole tag), still waiting to see what follows.
+      if (tail.length <= this.stop.length) {
+        if (this.stop.startsWith(tail)) return k;
+        continue;
+      }
+
+      // The whole tag, then whitespace, then a partial `<parameter`.
+      if (!tail.startsWith(this.stop)) continue;
+      const after = tail.slice(this.stop.length).replace(/^\s*/, "");
+      if ("<parameter".startsWith(after)) return k;
+    }
+
+    return 0;
+  }
+}
+
+// Splits a decoded field value at the leak boundary. `clean` is the real value; `leaked`
+// is the tool-call syntax the provider swallowed into it (empty when there was no leak).
+// The boundary is the same signature FieldDecoder truncates the stream at, so the settled
+// value and the streamed one agree to the character. A bare `</summary>` is left untouched.
+export function splitLeak(
+  value: string,
+  field: string,
+): { clean: string; leaked: string } {
+  const i = value.search(new RegExp(`</${escapeRe(field)}>\\s*<parameter`));
+  return i === -1
+    ? { clean: value, leaked: "" }
+    : { clean: value.slice(0, i), leaked: value.slice(i) };
+}
+
+// Recovers fields the provider swallowed, from the value it swallowed them into.
+//
+// Same defect as the stop marker above, seen from the other end: when the leak happens,
+// the fields that came after the leaked one never become JSON keys, so `verdict` simply
+// is not there. It has not vanished, though — it is sitting in the previous field's text,
+// in the format the model actually wrote it in. Reading it back out is strictly better
+// than discarding a verdict the model did produce and falling back to a default it did
+// not choose.
+export function recoverLeakedFields(text: string): Record<string, string> {
+  const found: Record<string, string> = {};
+  const pattern = /<parameter name="([^"]+)">\s*([^<\n]*)/g;
+
+  for (const [, name, value] of text.matchAll(pattern)) {
+    const trimmed = value.trim();
+    if (trimmed.length > 0) found[name] = trimmed;
+  }
+
+  return found;
 }

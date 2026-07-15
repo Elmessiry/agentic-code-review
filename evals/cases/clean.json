@@ -1,0 +1,9 @@
+{
+  "name": "clean",
+  "asserts": "Code that is fine must produce ZERO high-severity findings. A model that invents one to look diligent is worse than useless: it trains the reader to ignore every finding it ever produces. This is the anti-hallucination test, and it is the one most systems quietly fail.",
+  "code": "export function chunk<T>(items: readonly T[], size: number): T[][] {\n  if (!Number.isInteger(size) || size < 1) {\n    throw new RangeError(`chunk size must be a positive integer, got ${size}`);\n  }\n\n  const out: T[][] = [];\n  for (let i = 0; i < items.length; i += size) {\n    out.push(items.slice(i, i + size));\n  }\n  return out;\n}\n",
+  "expect": {
+    "maxHigh": 0,
+    "verdict": ["approve"]
+  }
+}

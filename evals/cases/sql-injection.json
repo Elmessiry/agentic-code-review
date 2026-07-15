@@ -1,0 +1,18 @@
+{
+  "name": "sql-injection",
+  "asserts": "The bread-and-butter case: an unparameterised query built by string concatenation, on an unauthenticated route. Security must run, must flag the concatenation at the line it happens on, and the verdict must not be an approval.",
+  "code": "app.get(\"/orders\", async (req, res) => {\n  const id = req.query.customer;\n  const rows = await db.all(\"SELECT * FROM orders WHERE customer = '\" + id + \"'\");\n  res.json(rows);\n});\n",
+  "expect": {
+    "agents": { "include": ["security"] },
+    "findings": [
+      {
+        "what": "user input concatenated into the SQL string",
+        "line": 3,
+        "minSeverity": "high",
+        "by": "security",
+        "match": "concatenat|interpolat|parameteri|prepared|\\bquery\\b"
+      }
+    ],
+    "verdict": ["changes_requested", "reject"]
+  }
+}

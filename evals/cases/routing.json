@@ -1,0 +1,9 @@
+{
+  "name": "routing",
+  "asserts": "A presentational component with no I/O, no user input reaching a sink, and no hot path. The planner must NOT spend money on Security here — JSX escapes its interpolations, and a planner that fires every lens at every file is a planner that does nothing except cost four times as much.",
+  "code": "export function Badge({ label, tone }) {\n  const cls = tone === \"warn\" ? \"badge badge-warn\" : \"badge\";\n  return <span className={cls}>{label}</span>;\n}\n",
+  "expect": {
+    "agents": { "exclude": ["security"] },
+    "maxHigh": 0
+  }
+}

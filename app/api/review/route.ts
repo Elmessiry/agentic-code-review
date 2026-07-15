@@ -1,9 +1,6 @@
 import { readCode } from "@/lib/guards/input-cap";
 import { modelFor } from "@/lib/models";
-import { overrideNotes, plan } from "@/lib/pipeline/plan";
-import { fanOut } from "@/lib/pipeline/specialists";
-import { synthesize } from "@/lib/pipeline/synthesize";
-import { approxTokens } from "@/lib/prompts/shared-prefix";
+import { runReview } from "@/lib/pipeline/review";
 import type { ReviewEvent } from "@/lib/pipeline/schema";
 
 // The whole pipeline, on one connection: guard → tripwire → plan → specialists → synthesize.
@@ -19,8 +16,10 @@ import type { ReviewEvent } from "@/lib/pipeline/schema";
 // about what ran — the planner's decision is only trustworthy if the thing that acts on
 // it is the same thing that made it.
 //
-// So the orchestration is here, on the server, and the browser's job shrinks to
-// rendering events as they arrive.
+// What is left here is the transport, and only the transport: the guard, the abort
+// plumbing, and turning events into SSE frames. The pipeline itself lives in
+// lib/pipeline/review.ts, because the eval harness has to score the same orchestration
+// this route runs rather than a re-implementation that resembles it.
 
 // The platform's ceiling for the whole pipeline. Requires Fluid Compute on the Hobby
 // plan; lower to 60 if deploying without it.
@@ -45,13 +44,14 @@ export async function POST(request: Request): Promise<Response> {
 
   const code = input.code;
 
-  // Resolved BEFORE any model call: modelFor throws by design on an unknown env
-  // override, and a throw during payload construction would land after the planner had
+  // Resolved BEFORE the stream opens: modelFor throws by design on an unknown env
+  // override, and a throw once the pipeline is running would land after the planner had
   // already been billed — discarding paid-for work over a typo that was knowable up
-  // front. Fail while failing is still free.
-  let specialistModel;
+  // front. Fail while failing is still free, and while a status code is still possible.
   try {
-    specialistModel = modelFor("specialist");
+    modelFor("specialist");
+    modelFor("planner");
+    modelFor("synthesizer");
   } catch (error) {
     console.error("[review] model registry rejected the configuration", error);
     return Response.json(
@@ -76,7 +76,6 @@ export async function POST(request: Request): Promise<Response> {
   request.signal.addEventListener("abort", stopOn("the client disconnected"));
 
   const encoder = new TextEncoder();
-  const spec = specialistModel;
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -97,72 +96,7 @@ export async function POST(request: Request): Promise<Response> {
       };
 
       try {
-        const { plan: decision, usage: planUsage } = await plan(code, control.signal);
-
-        send({
-          type: "plan",
-          plan: {
-            ...decision,
-            overrides: overrideNotes(code),
-            costUsd: planUsage.costUsd,
-          },
-        });
-
-        const fan = await fanOut(
-          decision.agents,
-          code,
-          {
-            onStart: (specialist) => send({ type: "specialist_start", specialist }),
-            onOutcome: (outcome) =>
-              outcome.ok
-                ? send({
-                    type: "specialist_done",
-                    specialist: outcome.result.specialist,
-                    findings: outcome.result.findings,
-                    droppedLineRefs: outcome.result.droppedLineRefs,
-                  })
-                : send({
-                    type: "specialist_error",
-                    specialist: outcome.failure.specialist,
-                    error: outcome.failure.error,
-                  }),
-          },
-          control.signal,
-        );
-
-        const synthesisUsd = await runSynthesis(
-          code,
-          decision.agents.length,
-          fan,
-          control.signal,
-          send,
-        );
-
-        const prefixTokens = approxTokens(code);
-
-        send({
-          type: "done",
-          cost: {
-            planUsd: planUsage.costUsd,
-            specialistsUsd: fan.costUsd,
-            synthesisUsd,
-            totalUsd: planUsage.costUsd + fan.costUsd + synthesisUsd,
-          },
-          // Everything needed to tell whether the caching strategy actually worked,
-          // rather than whether it was configured. A cachedTokens of 0 across a
-          // multi-specialist run means the prefix is not being reused, whatever the
-          // code believes.
-          cache: {
-            mode: spec.caching,
-            model: spec.id,
-            prefixTokens,
-            minCacheTokens: spec.minCacheTokens,
-            clearsFloor: prefixTokens >= spec.minCacheTokens,
-            cachedTokens: fan.cachedTokens,
-            inputTokens: fan.inputTokens,
-            hitRate: fan.inputTokens > 0 ? fan.cachedTokens / fan.inputTokens : 0,
-          },
-        });
+        await runReview(code, send, control.signal);
       } catch (error) {
         // The response is a 200 that is already open — the status line went out before
         // the pipeline had done anything that could fail. So a failure here cannot be an
@@ -207,71 +141,4 @@ export async function POST(request: Request): Promise<Response> {
       "X-Accel-Buffering": "no",
     },
   });
-}
-
-// The synthesis step, and the two cases where the right move is not to take it.
-//
-// Synthesis is the most expensive call in the pipeline by a distance — measured at 70%
-// of a review, roughly 2.5x what all the specialists cost together. Paying it to
-// announce that nothing is wrong is the worst trade in the system. There is nothing to
-// merge, nothing to rank, and no disagreement to resolve, so the verdict is written here
-// instead, for free:
-//
-//   nobody was selected — the planner judged that no lens was worth running. That is a
-//   real answer, and it still deserves a verdict rather than an empty page.
-//
-//   everybody ran and nobody found anything — an approval, arrived at honestly.
-//
-// The failure case is deliberately NOT folded into either shortcut. If a specialist
-// died, an empty result set is not a clean bill of health, it is a review with a hole in
-// it — and the synthesizer is the thing that knows how to say so. An outage must never
-// be able to come out of this function looking like an approval.
-async function runSynthesis(
-  code: string,
-  selected: number,
-  fan: Awaited<ReturnType<typeof fanOut>>,
-  signal: AbortSignal,
-  send: (event: ReviewEvent) => void,
-): Promise<number> {
-  const approve = (text: string) => {
-    send({ type: "synthesis_delta", text });
-    send({ type: "synthesis_done", findings: [], verdict: "approve" });
-    return 0;
-  };
-
-  if (selected === 0) {
-    return approve(
-      "The planner read this code and found no lens worth running on it — nothing here is exposed to an attacker, on a hot path, hard to follow, or hard to test. No specialist ran, so this review cost the planner alone.",
-    );
-  }
-
-  // Every selected specialist failed. Nothing ran, so nothing can be concluded — and
-  // saying "approve" here would be inventing a clean bill of health out of an outage.
-  // The failure cards are already on the page; they are the honest report.
-  if (fan.results.length === 0) return 0;
-
-  const foundSomething = fan.results.some((r) => r.findings.length > 0);
-  const everyoneReported = fan.failures.length === 0;
-
-  if (!foundSomething && everyoneReported) {
-    return approve(
-      "Every specialist that ran read this code and found nothing worth raising. There was nothing to merge, rank or disagree about, so no synthesis call was made — this review cost what the specialists cost.",
-    );
-  }
-
-  const { synthesis, usage } = await synthesize(
-    code,
-    fan.results,
-    fan.failures.map((f) => f.specialist),
-    (text) => send({ type: "synthesis_delta", text }),
-    signal,
-  );
-
-  send({
-    type: "synthesis_done",
-    findings: synthesis.findings,
-    verdict: synthesis.verdict,
-  });
-
-  return usage.costUsd;
 }

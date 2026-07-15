@@ -1,0 +1,17 @@
+{
+  "name": "conflict",
+  "asserts": "The case the synthesizer exists for. Reading and parsing a schema file on every request is a blocking hot-path cost to Performance and an unhandled-crash risk to Security — the same line, two lenses, different vocabularies. The merged review must carry it as ONE finding with at least two sources, which is the only corroborating signal this pipeline can produce.",
+  "code": "app.post(\"/validate\", async (req, res) => {\n  const schema = JSON.parse(fs.readFileSync(\"./schema.json\", \"utf8\"));\n  const rows = await db.all(\"SELECT * FROM items WHERE owner = \" + req.body.owner);\n  const valid = rows.filter((row) => check(row, schema));\n  res.json(valid);\n});\n",
+  "expect": {
+    "agents": { "include": ["security", "performance"] },
+    "findings": [
+      {
+        "what": "the schema file is read and parsed on every request",
+        "line": 2,
+        "sourcesAtLeast": 2,
+        "match": "every request|per request|each request|startup|hoist|cache|module scope|synchronous|blocking"
+      }
+    ],
+    "verdict": ["changes_requested", "reject"]
+  }
+}

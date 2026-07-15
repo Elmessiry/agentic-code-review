@@ -331,15 +331,44 @@ export async function callTool<T>(opts: CallOptions & { tool: Tool }): Promise<{
   return { args: value, usage };
 }
 
-// The forced tool call's arguments arrive as a JSON string, and a model that runs out
-// of output budget mid-object hands back a truncated one. Parsing it is therefore a
-// place that fails, not a formality.
+// The forced tool call's arguments arrive as a JSON string, and that string is not
+// reliably JSON. Parsing it is a place that fails, not a formality.
+//
+// Two failure shapes, both caught by the eval suite against a live provider rather than
+// imagined. A model that runs out of output budget hands back a truncated object. And a
+// provider that cannot serialise its own tool call hands back a valid object with rubbish
+// stuck to the end of it — a real one arrived as `…"verdict":"reject"}}`, a complete and
+// correct review with one brace too many.
+//
+// Throwing that away is expensive: it costs the synthesis that was already paid for and
+// drops the review onto the deterministic fallback, which loses the model's ranking and
+// its verdict. So a small, bounded repair is tried first — trailing characters are shaved
+// off, up to a handful, and the parse retried. Nothing is added, nothing is guessed: if
+// the object was not already complete and correct, this fails exactly as it did before.
+const MAX_TRAILING_GARBAGE = 8;
+
 function parseArgs<T>(raw: string, name: string): T {
   try {
     return JSON.parse(raw) as T;
   } catch {
-    throw new OpenRouterError(502, `${name} returned unparseable arguments: ${raw}`);
+    // Fall through to the repair.
   }
+
+  const trimmed = raw.trimEnd();
+
+  for (let shave = 1; shave <= MAX_TRAILING_GARBAGE && shave < trimmed.length; shave++) {
+    try {
+      const value = JSON.parse(trimmed.slice(0, -shave)) as T;
+      console.warn(
+        `[openrouter] ${name} returned ${shave} trailing character(s) of malformed JSON — repaired`,
+      );
+      return value;
+    } catch {
+      // Still broken. Shave another character.
+    }
+  }
+
+  throw new OpenRouterError(502, `${name} returned unparseable arguments: ${raw}`);
 }
 
 // Reads a non-streaming completion: the assistant's text plus what it cost. Goes
