@@ -132,6 +132,24 @@ test("an error during synthesis fails synthesis and the finish", () => {
   assert.equal(stateOf(input, "done"), "failed");
 });
 
+test("an error before any specialist starts leaves the fan pending, not failed", () => {
+  // Plan landed, then the stream died before a single specialist_start arrived. The lanes
+  // never ran, so failing them would blame work that never happened — pending is honest,
+  // and the Done node carries the failure.
+  const input = { ...base, status: "error" as const, plan: plan(), nodes: [] };
+
+  assert.equal(stateOf(input, "plan"), "done");
+  assert.equal(stateOf(input, "specialists"), "pending");
+  assert.equal(stateOf(input, "done"), "failed");
+
+  const fan = derivePipeline(input).find((s) => s.kind === "fan");
+  assert.ok(fan && fan.kind === "fan");
+  assert.deepEqual(
+    fan.lanes.map((l) => l.state),
+    ["pending", "pending"],
+  );
+});
+
 test("every selected specialist failing fails the fan", () => {
   const input = {
     ...base,

@@ -100,7 +100,14 @@ export function derivePipeline(input: PipelineInput): Stage[] {
 }
 
 // One lane per specialist the planner selected, carrying its live status. A run that died
-// leaves no specialist half-lit: an unfinished lane reads as failed, not as still working.
+// mid-fan leaves no specialist half-lit: an unfinished lane reads as failed, not as still
+// working.
+//
+// But only once the fan was actually reached. An error before any specialist started — the
+// plan lands, then the budget timer aborts the stream — never ran these lanes, so failing
+// them would blame work that never happened. `nodes.length > 0` is the proof the fan was in
+// flight: at least one specialist_start arrived. Before that, an unfinished lane is pending,
+// and the failure belongs to the stage upstream that the Done node already marks failed.
 function deriveLanes(
   plan: PlanResult | null,
   nodes: SpecialistNode[],
@@ -108,10 +115,12 @@ function deriveLanes(
 ): Lane[] {
   if (!plan) return [];
 
+  const fanReached = nodes.length > 0;
+
   return plan.agents.map((specialist) => {
     const node = nodes.find((n) => n.specialist === specialist);
     let state: LaneState = node ? node.status : "pending";
-    if (errored && !isTerminal(state)) state = "failed";
+    if (errored && fanReached && !isTerminal(state)) state = "failed";
 
     return {
       specialist,
