@@ -119,9 +119,9 @@ estimated from token counts:
 
 The expensive part of this architecture is not the fan-out everyone worries about. It is
 the **single call at the end** — 2.5× what all the specialists cost together, because the
-synthesizer is the one role still pointed at an expensive model. Which model each role
-deserves is a question with a number attached to it now, and the eval harness is what will
-answer it.
+synthesizer runs on the most expensive model in the registry. That is a deliberate choice
+the eval harness made, not an accident it will fix: cheaper models tie it on every average
+and then flake the one case that matters most (see below).
 
 ### The cost shown includes the attempts that died
 
@@ -167,12 +167,12 @@ not flip when the code tells the reviewer to approve it, and a conflict case ass
 one defect comes back carrying **two independent sources** — the only corroborating signal
 the pipeline produces.
 
-|                    | result    |
-| ------------------ | --------- |
-| recall             | **100%**  |
-| false positives    | **0**     |
-| schema conformance | **100%**  |
-| cost, six reviews  | **$0.10** |
+|                    | result               |
+| ------------------ | -------------------- |
+| recall             | **100%**             |
+| false positives    | **0**                |
+| schema conformance | **100%**             |
+| cost, six reviews  | **$0.10** (replayed) |
 
 CI replays recorded fixtures — free, deterministic, keyed by a hash of the request — so it
 scores the routing, the tripwire, the merge, the line validation and the totals without
@@ -180,6 +180,40 @@ spending a cent or turning red because a model phrased something differently. Wh
 models themselves still behave is a separate question that needs the live API, so it runs
 on a nightly job instead of on every push. A changed prompt misses the fixtures loudly and
 says to re-record, rather than serving a stale answer to a request that no longer matches.
+
+### The eval harness picked the synthesizer — and did not pick the cheapest
+
+`npm run eval -- --matrix=<role>` points a role at each candidate in turn, holds the other
+two at their defaults, and runs the whole suite live against each. The synthesizer is the
+most expensive call in the pipeline and the one a blog post would tell you needs the
+strongest model, so it is the one worth actually measuring. On the aggregate scores, it was
+a tie — every candidate cleared every case, and cost was the only thing left:
+
+| synthesizer               | passed | recall | false pos | conformance | cost, six reviews (live) |
+| ------------------------- | ------ | ------ | --------- | ----------- | ------------------------ |
+| anthropic/claude-sonnet-5 | 6/6    | 100%   | 0         | 100%        | $0.109                   |
+| x-ai/grok-4.3             | 6/6    | 100%   | 0         | 100%        | $0.052                   |
+| deepseek/deepseek-v4-pro  | 6/6    | 100%   | 0         | 100%        | $0.094                   |
+| openai/gpt-5-mini         | 6/6    | 100%   | 0         | 100%        | **$0.035**               |
+
+Cost alone says take gpt-5-mini and cut the bill by two thirds. But a single suite run is one
+sample, and the clean case — the anti-hallucination test, where fine code must come back
+**approve** — is nondeterministic. Run it repeatedly and the tie falls apart:
+
+| synthesizer               | clean case: `approve` |
+| ------------------------- | --------------------- |
+| anthropic/claude-sonnet-5 | 3 / 3                 |
+| x-ai/grok-4.3             | 4 / 5                 |
+| openai/gpt-5-mini         | **1 / 5**             |
+
+gpt-5-mini blocks a merge on genuinely clean code four times in five, escalating a
+low-severity "you could add tests" note into `changes_requested`; grok does it one time in
+five. Neither raised a high-severity finding, so the false-positive budget never caught it —
+only the verdict did, and only under repetition. On the nightly live eval, a synthesizer that
+flakes the clean case turns the build red on nights nothing regressed, which is the failure
+mode the whole harness exists to avoid. So the money stays on Sonnet: the harness chose it,
+not because it is strongest on reputation, but because it is the one that holds the case that
+matters most every single time.
 
 ### Caching is not one primitive, and it changes the architecture
 
@@ -265,11 +299,10 @@ today:  guard → tripwire → plan → specialists (parallel) → synthesize �
 next:   a rate limit and a real-dollar spend cap, then a public deploy
 ```
 
-The default model for each role is still chosen by argument rather than measurement, and
-the cost table above shows where that hurts: 70% of every review is one call to the most
-expensive model in the registry. The harness can score alternatives for a role through env
-overrides without touching code, so replacing those defaults with measured winners is the
-next thing it is pointed at.
+The synthesizer default has been through the matrix; the planner and specialist defaults
+have not, and are still chosen by argument. The harness scores a role's candidates through
+env overrides without touching code (`--matrix=planner`, `--matrix=specialist`), so putting
+the other two roles through it is a run away, not a rewrite.
 
 ## Design notes
 
