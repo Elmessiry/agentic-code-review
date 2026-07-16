@@ -1,6 +1,8 @@
 import { readCode } from "@/lib/guards/input-cap";
+import { checkRateLimit } from "@/lib/guards/rate-limit";
+import { checkSpendCap, recordSpend } from "@/lib/guards/spend-cap";
 import { modelFor } from "@/lib/models";
-import { runReview } from "@/lib/pipeline/review";
+import { billedSoFar, runReview } from "@/lib/pipeline/review";
 import type { ReviewEvent } from "@/lib/pipeline/schema";
 
 // The whole pipeline, on one connection: guard → tripwire → plan → specialists → synthesize.
@@ -41,6 +43,17 @@ const PIPELINE_BUDGET_MS = 270_000;
 export async function POST(request: Request): Promise<Response> {
   const input = await readCode(request);
   if (!input.ok) return input.response;
+
+  // The free, local check ran above; the two counter checks fire together — they are
+  // independent reads against the same store, and serialising them would double the
+  // round-trip latency for nothing. All of it happens before the first token is
+  // bought: a guard that fires after the model call is an invoice, not a guard.
+  const [rate, budgetLeft] = await Promise.all([
+    checkRateLimit(request),
+    checkSpendCap(),
+  ]);
+  if (!rate.ok) return rate.response;
+  if (!budgetLeft.ok) return budgetLeft.response;
 
   const code = input.code;
 
@@ -86,7 +99,16 @@ export async function POST(request: Request): Promise<Response> {
       // once, here, and a dead stream simply stops being written to.
       let open = true;
 
+      // What this review has been billed so far, kept current as the events pass so
+      // a pipeline that dies mid-run still settles what it saw. The reading itself is
+      // the pipeline's (billedSoFar) — this route only holds the running number. The
+      // daily cap tolerates the slack of a partial count; the layer that cannot be
+      // under-reported to is the provider's own limit on the key.
+      let billedUsd = 0;
+
       const send = (event: ReviewEvent) => {
+        billedUsd = billedSoFar(event, billedUsd);
+
         if (!open) return;
         try {
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
@@ -111,6 +133,11 @@ export async function POST(request: Request): Promise<Response> {
         });
       } finally {
         clearTimeout(budget);
+
+        // Recorded even when the pipeline failed or the client left: the money is
+        // spent either way, and a cap that only counted the happy path would be
+        // optimistic on exactly the days things went wrong.
+        await recordSpend(billedUsd);
 
         if (open) {
           try {

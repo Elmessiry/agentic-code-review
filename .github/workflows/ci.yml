@@ -43,3 +43,29 @@ jobs:
       # pull request did not cause, and a build like that is one people learn to ignore.
       # It runs nightly instead — see eval-nightly.yml.
       - run: npm run eval
+
+  e2e:
+    name: E2E
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install chromium --with-deps
+
+      # Playwright builds and starts the production server itself (see
+      # playwright.config.ts), pointed at a local mock that answers with the recorded
+      # eval fixtures — so this job needs no secret and spends nothing, same bargain
+      # as the replayed evals above. The dummy key exists because the request handler
+      # correctly refuses to run without one; nothing ever validates it.
+      - run: npm run test:e2e
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-traces
+          path: test-results/
+          retention-days: 7

@@ -23,6 +23,22 @@ import type { ReviewEvent } from "./schema";
 
 export type Emit = (event: ReviewEvent) => void;
 
+// What a review has been billed so far, read off its own event stream: the plan event
+// carries the planner's cost, the done event the full total, and a run that dies
+// between the two under-reports by the specialists' spend, because per-specialist
+// costs only ride on the final total.
+//
+// This lives HERE, not in the route that needs it, because it is knowledge about which
+// events carry money — and that is this module's contract. A route that reached into
+// event fields itself would keep compiling right up until the day a cost field moved
+// and the spend ledger quietly stopped seeing it; here, the reader sits in the same
+// file as every emit it has to stay true to.
+export function billedSoFar(event: ReviewEvent, previous: number): number {
+  if (event.type === "plan") return event.plan.costUsd;
+  if (event.type === "done") return event.cost.totalUsd;
+  return previous;
+}
+
 export async function runReview(
   code: string,
   emit: Emit,
