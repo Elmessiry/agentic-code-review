@@ -1,4 +1,6 @@
 import { readCode } from "@/lib/guards/input-cap";
+import { checkRateLimit } from "@/lib/guards/rate-limit";
+import { checkSpendCap, recordSpend } from "@/lib/guards/spend-cap";
 import { modelFor } from "@/lib/models";
 import { runReview } from "@/lib/pipeline/review";
 import type { ReviewEvent } from "@/lib/pipeline/schema";
@@ -41,6 +43,16 @@ const PIPELINE_BUDGET_MS = 270_000;
 export async function POST(request: Request): Promise<Response> {
   const input = await readCode(request);
   if (!input.ok) return input.response;
+
+  // Ordered by cost of the check itself: the input cap above is free and local, the
+  // rate limit is one counter round-trip, the spend cap another. All of them run before
+  // the first token is bought — a guard that fires after the model call is an invoice,
+  // not a guard.
+  const rate = await checkRateLimit(request);
+  if (!rate.ok) return rate.response;
+
+  const budgetLeft = await checkSpendCap();
+  if (!budgetLeft.ok) return budgetLeft.response;
 
   const code = input.code;
 
@@ -86,7 +98,18 @@ export async function POST(request: Request): Promise<Response> {
       // once, here, and a dead stream simply stops being written to.
       let open = true;
 
+      // What this review has been billed so far, read off the events as they pass.
+      // The plan event carries the planner's cost and the done event the full total;
+      // a pipeline that dies between the two under-reports by the specialists' spend,
+      // because per-specialist costs only travel on the final total. The daily cap
+      // tolerates that slack — the layer that cannot be under-reported to is the
+      // provider's own limit on the key.
+      let billedUsd = 0;
+
       const send = (event: ReviewEvent) => {
+        if (event.type === "plan") billedUsd = event.plan.costUsd;
+        if (event.type === "done") billedUsd = event.cost.totalUsd;
+
         if (!open) return;
         try {
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
@@ -111,6 +134,11 @@ export async function POST(request: Request): Promise<Response> {
         });
       } finally {
         clearTimeout(budget);
+
+        // Recorded even when the pipeline failed or the client left: the money is
+        // spent either way, and a cap that only counted the happy path would be
+        // optimistic on exactly the days things went wrong.
+        await recordSpend(billedUsd);
 
         if (open) {
           try {

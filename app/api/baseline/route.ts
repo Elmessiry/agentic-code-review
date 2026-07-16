@@ -1,6 +1,8 @@
 import { completeText, OpenRouterError } from "@/lib/openrouter";
 import { generalReviewMessages } from "@/lib/prompts/general-review";
 import { readCode } from "@/lib/guards/input-cap";
+import { checkRateLimit } from "@/lib/guards/rate-limit";
+import { checkSpendCap, recordSpend } from "@/lib/guards/spend-cap";
 
 // One generalist agent, one round trip, plain text back. No planner, no specialists,
 // no synthesizer.
@@ -29,11 +31,22 @@ export async function POST(request: Request): Promise<Response> {
   const input = await readCode(request);
   if (!input.ok) return input.response;
 
+  // The same guards as the pipeline, because this route spends the same money. The
+  // baseline being the cheaper path is not an exemption — an unguarded control group
+  // is just the endpoint an abuser would pick.
+  const rate = await checkRateLimit(request);
+  if (!rate.ok) return rate.response;
+
+  const budgetLeft = await checkSpendCap();
+  if (!budgetLeft.ok) return budgetLeft.response;
+
   try {
     const { text, usage } = await completeText({
       role: "synthesizer",
       messages: generalReviewMessages(input.code),
     });
+
+    await recordSpend(usage.costUsd);
 
     return json({ review: text, costUsd: usage.costUsd }, 200);
   } catch (error) {
@@ -42,6 +55,8 @@ export async function POST(request: Request): Promise<Response> {
     console.error("[baseline] upstream failure", error);
 
     if (error instanceof OpenRouterError) {
+      // The failed attempts were still billed; the daily total has to know.
+      await recordSpend(error.usage.costUsd);
       return json({ error: "The model provider failed. Try again." }, 502);
     }
     return json({ error: "Something went wrong generating the review." }, 500);
