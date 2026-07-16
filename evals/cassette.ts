@@ -25,7 +25,9 @@ const FIXTURES = "evals/fixtures/calls.json";
 
 type Recorded = { status: number; body: string };
 
-function keyOf(url: string, body: string): string {
+// Exported because the e2e mock upstream serves the same fixtures and must agree on
+// the key, or every request it sees is a miss.
+export function keyOf(url: string, body: string): string {
   return createHash("sha256").update(`${url}\n${body}`).digest("hex").slice(0, 16);
 }
 

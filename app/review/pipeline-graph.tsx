@@ -42,9 +42,22 @@ function StateDot({ state }: { state: NodeState }) {
   );
 }
 
-function StageNode({ label, state }: { label: string; state: NodeState }) {
+// data-stage / data-state exist for the e2e tests: colour is how a human reads the
+// graph, but a test asserting on Tailwind classes would break on a restyle that
+// changed nothing about the pipeline.
+function StageNode({
+  id,
+  label,
+  state,
+}: {
+  id: string;
+  label: string;
+  state: NodeState;
+}) {
   return (
     <div
+      data-stage={id}
+      data-state={state}
       className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium whitespace-nowrap ${NODE[state]}`}
     >
       <StateDot state={state} />
@@ -56,6 +69,8 @@ function StageNode({ label, state }: { label: string; state: NodeState }) {
 function LaneNode({ lane }: { lane: Lane }) {
   return (
     <div
+      data-lane={lane.specialist}
+      data-state={lane.state}
       className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] whitespace-nowrap ${NODE[lane.state]}`}
     >
       <StateDot state={lane.state} />
@@ -74,7 +89,7 @@ function LaneNode({ lane }: { lane: Lane }) {
 // each side, which is the parallelism made literal.
 function Fan({ stage }: { stage: Extract<Stage, { kind: "fan" }> }) {
   if (stage.state === "skipped" || stage.lanes.length === 0) {
-    return <StageNode label={stage.label} state={stage.state} />;
+    return <StageNode id={stage.id} label={stage.label} state={stage.state} />;
   }
 
   if (stage.lanes.length === 1) {
@@ -118,7 +133,7 @@ export default function PipelineGraph(input: PipelineInput) {
             {stage.kind === "fan" ? (
               <Fan stage={stage} />
             ) : (
-              <StageNode label={stage.label} state={stage.state} />
+              <StageNode id={stage.id} label={stage.label} state={stage.state} />
             )}
           </Fragment>
         ))}

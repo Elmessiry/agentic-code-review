@@ -10,7 +10,12 @@ import { modelFor, type Role } from "@/lib/models";
 import { sseEvents } from "@/lib/sse";
 import { FieldDecoder } from "@/lib/partial-json";
 
-const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+// Overridable for exactly one reason: the end-to-end tests run the real production
+// build against recorded fixtures, and the redirect has to happen underneath the
+// build rather than inside it. Anything else — dev, CI evals, production — leaves
+// this unset and talks to OpenRouter.
+const OPENROUTER_URL =
+  process.env.OPENROUTER_URL ?? "https://openrouter.ai/api/v1/chat/completions";
 
 // No single model call should take this long. Without it, a stalled upstream holds a
 // serverless function open until the platform kills it — we pay for the wall time and
