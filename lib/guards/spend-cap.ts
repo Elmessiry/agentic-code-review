@@ -74,12 +74,17 @@ export async function checkSpendCap(): Promise<Ok | Err> {
 export async function recordSpend(costUsd: number): Promise<void> {
   if (!upstashConfigured() || !(costUsd > 0)) return;
 
+  // Resolved once for both commands. Evaluated twice, a call straddling midnight UTC
+  // would increment yesterday's key and set the expiry on today's — leaving the one
+  // that was actually written with no TTL at all, immortal.
+  const key = todayKey();
+
   try {
     await pipeline([
-      ["INCRBYFLOAT", todayKey(), costUsd],
+      ["INCRBYFLOAT", key, costUsd],
       // Two days, not one: the key must outlive its own UTC day everywhere on earth,
       // and precision past that buys nothing.
-      ["EXPIRE", todayKey(), 172_800, "NX"],
+      ["EXPIRE", key, 172_800, "NX"],
     ]);
   } catch (error) {
     console.error("[spend-cap] failed to record spend", error);

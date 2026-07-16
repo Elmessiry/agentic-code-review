@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { keyOf } from "../evals/cassette";
+import { CANONICAL_OPENROUTER_URL } from "../lib/openrouter";
 
 // The upstream the e2e tests talk to instead of OpenRouter: the eval fixtures, served
 // over local HTTP.
@@ -12,11 +13,11 @@ import { keyOf } from "../evals/cassette";
 // same recordings. The demo's example snippets are the eval cases, byte for byte, which
 // is why the requests a browser click produces hash to fixtures that already exist.
 //
-// Keys are computed against the CANONICAL OpenRouter URL, not the localhost one the
+// Keys are computed against the canonical OpenRouter URL, not the localhost one the
 // request actually arrived on: the recordings were made against the real API, and the
-// key must match what the recorder saw.
+// key must match what the recorder saw — so the URL is imported from the one place
+// that owns it rather than copied here.
 
-const CANONICAL_URL = "https://openrouter.ai/api/v1/chat/completions";
 const PORT = Number(process.env.MOCK_UPSTREAM_PORT ?? 8787);
 
 type Recorded = { status: number; body: string };
@@ -31,7 +32,7 @@ async function main(): Promise<void> {
     req.setEncoding("utf8");
     req.on("data", (chunk: string) => (body += chunk));
     req.on("end", () => {
-      const hit = calls[keyOf(CANONICAL_URL, body)];
+      const hit = calls[keyOf(CANONICAL_OPENROUTER_URL, body)];
 
       if (!hit) {
         // A miss means the request no longer matches the recording — same contract as
@@ -58,4 +59,11 @@ async function main(): Promise<void> {
   });
 }
 
-void main();
+// A missing or corrupt fixtures file must kill this process immediately and say why.
+// Left as an unhandled rejection, the trace disappears into Playwright's buffered
+// server output and the visible failure is a webServer timeout, three layers away
+// from the cause.
+main().catch((error) => {
+  console.error("[mock-upstream] failed to start", error);
+  process.exit(1);
+});

@@ -40,6 +40,13 @@ export default defineConfig({
         // never checked by anything; it exists because the handler refuses to run
         // without one, and that refusal is correct in production.
         OPENROUTER_API_KEY: "e2e-fixture-replay",
+        // Pinned empty, not merely omitted: `next start` loads .env.local, so a
+        // developer who put real Upstash credentials there (the deploy setup says to)
+        // would otherwise run these tests against the PRODUCTION counters — every
+        // local run writing fixture costs into the real spend key and marching the
+        // real rate limit toward 429. Empty is falsy, so the guards stand aside.
+        UPSTASH_REDIS_REST_URL: "",
+        UPSTASH_REDIS_REST_TOKEN: "",
       },
     },
   ],

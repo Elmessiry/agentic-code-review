@@ -34,10 +34,11 @@ export async function POST(request: Request): Promise<Response> {
   // The same guards as the pipeline, because this route spends the same money. The
   // baseline being the cheaper path is not an exemption — an unguarded control group
   // is just the endpoint an abuser would pick.
-  const rate = await checkRateLimit(request);
+  const [rate, budgetLeft] = await Promise.all([
+    checkRateLimit(request),
+    checkSpendCap(),
+  ]);
   if (!rate.ok) return rate.response;
-
-  const budgetLeft = await checkSpendCap();
   if (!budgetLeft.ok) return budgetLeft.response;
 
   try {

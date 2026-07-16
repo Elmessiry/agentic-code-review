@@ -2,7 +2,7 @@ import { readCode } from "@/lib/guards/input-cap";
 import { checkRateLimit } from "@/lib/guards/rate-limit";
 import { checkSpendCap, recordSpend } from "@/lib/guards/spend-cap";
 import { modelFor } from "@/lib/models";
-import { runReview } from "@/lib/pipeline/review";
+import { billedSoFar, runReview } from "@/lib/pipeline/review";
 import type { ReviewEvent } from "@/lib/pipeline/schema";
 
 // The whole pipeline, on one connection: guard → tripwire → plan → specialists → synthesize.
@@ -44,14 +44,15 @@ export async function POST(request: Request): Promise<Response> {
   const input = await readCode(request);
   if (!input.ok) return input.response;
 
-  // Ordered by cost of the check itself: the input cap above is free and local, the
-  // rate limit is one counter round-trip, the spend cap another. All of them run before
-  // the first token is bought — a guard that fires after the model call is an invoice,
-  // not a guard.
-  const rate = await checkRateLimit(request);
+  // The free, local check ran above; the two counter checks fire together — they are
+  // independent reads against the same store, and serialising them would double the
+  // round-trip latency for nothing. All of it happens before the first token is
+  // bought: a guard that fires after the model call is an invoice, not a guard.
+  const [rate, budgetLeft] = await Promise.all([
+    checkRateLimit(request),
+    checkSpendCap(),
+  ]);
   if (!rate.ok) return rate.response;
-
-  const budgetLeft = await checkSpendCap();
   if (!budgetLeft.ok) return budgetLeft.response;
 
   const code = input.code;
@@ -98,17 +99,15 @@ export async function POST(request: Request): Promise<Response> {
       // once, here, and a dead stream simply stops being written to.
       let open = true;
 
-      // What this review has been billed so far, read off the events as they pass.
-      // The plan event carries the planner's cost and the done event the full total;
-      // a pipeline that dies between the two under-reports by the specialists' spend,
-      // because per-specialist costs only travel on the final total. The daily cap
-      // tolerates that slack — the layer that cannot be under-reported to is the
-      // provider's own limit on the key.
+      // What this review has been billed so far, kept current as the events pass so
+      // a pipeline that dies mid-run still settles what it saw. The reading itself is
+      // the pipeline's (billedSoFar) — this route only holds the running number. The
+      // daily cap tolerates the slack of a partial count; the layer that cannot be
+      // under-reported to is the provider's own limit on the key.
       let billedUsd = 0;
 
       const send = (event: ReviewEvent) => {
-        if (event.type === "plan") billedUsd = event.plan.costUsd;
-        if (event.type === "done") billedUsd = event.cost.totalUsd;
+        billedUsd = billedSoFar(event, billedUsd);
 
         if (!open) return;
         try {

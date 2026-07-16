@@ -23,15 +23,21 @@ function requestFrom(ip: string): Request {
   });
 }
 
+const realVercel = process.env.VERCEL;
+
 beforeEach(() => {
   process.env.UPSTASH_REDIS_REST_URL = "https://example.upstash.io";
   process.env.UPSTASH_REDIS_REST_TOKEN = "test-token";
+  // The forwarded header is only believed on the platform that rewrites it.
+  process.env.VERCEL = "1";
 });
 
 afterEach(() => {
   globalThis.fetch = realFetch;
   delete process.env.UPSTASH_REDIS_REST_URL;
   delete process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (realVercel === undefined) delete process.env.VERCEL;
+  else process.env.VERCEL = realVercel;
 });
 
 test("a request under the limit passes", async () => {
@@ -68,6 +74,26 @@ test("counts are per address, keyed by the first forwarded hop", async () => {
 
   await checkRateLimit(requestFrom("203.0.113.7, 10.0.0.1"));
   assert.equal(sentKey, "rate:203.0.113.7");
+});
+
+test("off the platform, the forwarded header is not believed", async () => {
+  // Anywhere that does not rewrite x-forwarded-for, the header is client bytes: an
+  // abuser rotating the value must not mint a fresh bucket per request. Everyone
+  // shares "unknown" — stricter, never looser.
+  delete process.env.VERCEL;
+
+  let sentKey = "";
+  globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+    const commands = JSON.parse(String(init?.body)) as string[][];
+    sentKey = commands[0][1];
+    return new Response(
+      JSON.stringify([{ result: 1 }, { result: 1 }, { result: 3600 }]),
+      { status: 200 },
+    );
+  }) as typeof fetch;
+
+  await checkRateLimit(requestFrom("203.0.113.7"));
+  assert.equal(sentKey, "rate:unknown");
 });
 
 test("unconfigured means local dev: the guard steps aside", async () => {

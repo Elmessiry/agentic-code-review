@@ -22,11 +22,17 @@ const WINDOW_SECONDS = 3600;
 type Ok = { ok: true };
 type Err = { ok: false; response: Response };
 
-// The first hop in x-forwarded-for is the client, and on Vercel the platform writes
-// this header itself, so it can be trusted not to be attacker-appended. Anything
-// without one shares a single "unknown" bucket — locally that is everyone, which is
-// fine, because locally the limit only matters when you are testing the limit.
+// The first hop in x-forwarded-for is the client — but only somewhere that overwrites
+// the header, and that is a property of the platform, not of the request. On Vercel
+// the platform writes it and a caller cannot spoof it; anywhere else it is just bytes
+// the client sent, and trusting it hands out a fresh rate-limit bucket per request to
+// anyone who rotates the value. So the trust is gated on the platform's own marker,
+// in code rather than in a comment. Untrusted requests share one "unknown" bucket:
+// on a laptop that is everyone (where the limit only matters when testing the limit),
+// and on an unrecognised host it fails toward stricter, never looser.
 function clientIp(request: Request): string {
+  if (!process.env.VERCEL) return "unknown";
+
   const forwarded = request.headers.get("x-forwarded-for");
   return forwarded?.split(",")[0]?.trim() || "unknown";
 }
