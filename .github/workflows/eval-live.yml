@@ -1,4 +1,4 @@
-name: Nightly evals
+name: Live evals
 
 # The evals that CI cannot run.
 #
@@ -14,8 +14,11 @@ name: Nightly evals
 # only way to find out is to go and look.
 on:
   schedule:
-    # 06:00 UTC. Nothing depends on the hour; it just wants to be a nightly, not an hourly.
-    - cron: "0 6 * * *"
+    # Mondays, 06:00 UTC. Every run costs real money (~$0.12), and drift does not move
+    # fast enough to be worth buying that answer daily — weekly keeps the signal alive
+    # at a thirtieth of the spend. workflow_dispatch covers the moments that cannot
+    # wait for Monday: before a release, after a provider incident, after a model swap.
+    - cron: "0 6 * * 1"
   workflow_dispatch:
 
 jobs:
