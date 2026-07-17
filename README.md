@@ -2,6 +2,8 @@
 
 **Paste code, get a review from a team instead of a generalist.** A planner decides which specialists your code needs, they review it in parallel through one lens each, and a synthesizer resolves their disagreements into a single verdict — streamed as it happens, with the real dollar cost on the page.
 
+**Live at [codereview.elmessiry.tech](https://codereview.elmessiry.tech).** Rate-limited to 10 reviews an hour per IP, under a daily spend cap — if the demo is over budget, it says so and resets at midnight UTC.
+
 [![CI](https://github.com/Elmessiry/agentic-code-review/actions/workflows/ci.yml/badge.svg)](https://github.com/Elmessiry/agentic-code-review/actions/workflows/ci.yml)
 ![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=next.js)
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
@@ -71,8 +73,6 @@ One review of a twelve-line handler, in real dollars from `usage.cost` (never es
 The synthesizer is the expensive part, not the fan-out — and the fan-out is kept cheap by caching the shared review context. Because a cache breakpoint below a vendor's floor (1,024 tokens, or 4,096 on some) caches nothing, the cached prefix is the taxonomy, rubric, examples, and code the four specialists share, not the short per-specialist prompts. On explicit-cache vendors (Anthropic) the first specialist warms the cache before the others fan out, because firing four at a cold prefix pays the write premium four times; on automatic-cache vendors (OpenAI, DeepSeek) they fan out at once for free. `ModelSpec` carries a `caching` mode so that difference lives in one file.
 
 ## What doesn't exist yet
-
-The public deploy. The guards it needs are built and tested; the URL is not live yet.
 
 The synthesizer default has been through the matrix; the planner and specialist defaults have not, and are still chosen by argument. `--matrix=planner` and `--matrix=specialist` put them through the same gate without a code change.
 
