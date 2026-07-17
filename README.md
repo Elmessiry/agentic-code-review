@@ -55,7 +55,7 @@ A generalist reviewer stays at `/api/baseline` as a permanent control group — 
 | schema conformance | **100%**             |
 | cost, six reviews  | **$0.10** (replayed) |
 
-CI replays recorded fixtures — free and deterministic, keyed by a hash of the request — so it never turns red because a model phrased something differently. A nightly job runs the same suite against the live API to catch model drift.
+CI replays recorded fixtures — free and deterministic, keyed by a hash of the request — so it never turns red because a model phrased something differently. A weekly job runs the same suite against the live API to catch model drift — live runs cost real money, and drift does not move fast enough to buy that answer daily.
 
 `npm run eval -- --matrix=<role>` scores each candidate model for a role against the whole suite and prints a comparison table. It is how the synthesizer default was chosen — and it did not choose the cheapest. On the aggregate scores every candidate tied, but the pass column gates on _every_ case, and the clean case is nondeterministic: run repeatedly, `gpt-5-mini` approves fine code only 1 time in 5 and `grok-4.3` 4 in 5, both escalating a low-severity note to `changes_requested`, where `claude-sonnet-5` approves every time. So the default stays on Sonnet — chosen by measurement, not reputation.
 
