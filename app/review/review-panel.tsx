@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import PlanCard, { type PlanResult } from "./plan-card";
 import FindingsPanel, { type SpecialistNode } from "./findings-panel";
@@ -62,6 +62,26 @@ export default function ReviewPanel() {
   const busy = status === "running";
   const synthesizing = busy && summary.length > 0 && findings === null;
 
+  // One controller per run, held in a ref so cancel() and the unmount cleanup can
+  // reach the run in flight. Aborting it tears down the fetch and the SSE reader
+  // behind it — without this, navigating away leaves the stream running (and the
+  // pipeline billing) to the end for a page nobody is looking at.
+  const abortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => abortRef.current?.abort(), []);
+
+  // Announced once, when the review settles. The streaming summary deliberately does
+  // NOT sit in a live region: a screen reader re-reads a live region on every change,
+  // and synthesis_delta changes the summary several times a second — the whole review
+  // read from the top, per word. One sentence at the end says what matters; the full
+  // text is on the page for whoever wants it. Derived, not stored: it changes exactly
+  // when the verdict lands or the run fails, so the region fires exactly once.
+  const announcement =
+    status === "error"
+      ? `The review failed. ${error}`
+      : verdict
+        ? `Review ready — verdict: ${verdict.replace("_", " ")}`
+        : "";
+
   function upsert(specialist: Specialist, next: SpecialistNode) {
     setNodes((current) => {
       const at = current.findIndex((n) => n.specialist === specialist);
@@ -73,8 +93,7 @@ export default function ReviewPanel() {
     });
   }
 
-  async function run() {
-    setStatus("running");
+  function clearRun() {
     setError("");
     setPlan(null);
     setNodes([]);
@@ -83,12 +102,25 @@ export default function ReviewPanel() {
     setVerdict(null);
     setCost(null);
     setCache(null);
+  }
+
+  function cancel() {
+    abortRef.current?.abort();
+  }
+
+  async function run() {
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setStatus("running");
+    clearRun();
 
     try {
       const res = await fetch("/api/review", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ code }),
+        signal: controller.signal,
       });
 
       // The guards answer before the stream opens — an oversized paste is a 413 with a
@@ -165,11 +197,21 @@ export default function ReviewPanel() {
       // connection dropped, or the platform killed the function mid-pipeline. Left
       // alone the button would sit on "Reviewing…" forever, which is the one thing
       // worse than an error: a UI that is confidently wrong about being alive.
-      if (!ended) {
+      if (!ended && !controller.signal.aborted) {
         setError("The review ended early. Nothing more is coming.");
         setStatus("error");
       }
     } catch (e) {
+      // Aborting surfaces as an AbortError out of the fetch or the for-await, but the
+      // signal is the ground truth — it covers every path the exception can take. A
+      // cancelled run is not a failure: an "error" status would paint the graph's
+      // unfinished stages red, blaming a pipeline the user deliberately stopped. It
+      // settles back to idle with the partial state cleared, as if never started.
+      if (controller.signal.aborted) {
+        clearRun();
+        setStatus("idle");
+        return;
+      }
       setError(e instanceof Error ? e.message : "Something went wrong.");
       setStatus("error");
     }
@@ -207,13 +249,23 @@ export default function ReviewPanel() {
             <CodeEditor value={code} onChange={setCode} disabled={busy} />
           </div>
 
-          <button
-            onClick={run}
-            disabled={busy || code.trim().length === 0}
-            className="bg-accent text-canvas self-start rounded-md px-4 py-2 text-sm font-medium transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {busy ? "Reviewing…" : "Review"}
-          </button>
+          <div className="flex items-center gap-2 self-start">
+            <button
+              onClick={run}
+              disabled={busy || code.trim().length === 0}
+              className="bg-accent text-canvas rounded-md px-4 py-2 text-sm font-medium transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {busy ? "Reviewing…" : "Review"}
+            </button>
+            {busy && (
+              <button
+                onClick={cancel}
+                className="border-border text-muted hover:text-ink hover:border-accent/50 rounded-md border px-4 py-2 text-sm font-medium transition"
+              >
+                Cancel
+              </button>
+            )}
+          </div>
 
           {cost && cache && (
             // The cost and the cache hit rate are the argument this project is making.
@@ -245,7 +297,13 @@ export default function ReviewPanel() {
         <section className="flex flex-col gap-3">
           <h2 className="text-muted text-sm font-medium">Review</h2>
 
-          <div aria-live="polite" className="flex flex-col gap-3">
+          {/* The one live region on the page. Kept apart from the content it reports
+              on so that streaming into the panel below never triggers it. */}
+          <div aria-live="polite" className="sr-only">
+            {announcement}
+          </div>
+
+          <div className="flex flex-col gap-3">
             {plan && <PlanCard plan={plan} />}
 
             {status === "idle" && (

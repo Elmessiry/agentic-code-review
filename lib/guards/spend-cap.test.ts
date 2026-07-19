@@ -73,13 +73,16 @@ test("recordSpend adds real dollars to today's key and sets its expiry once", as
   assert.deepEqual(commands[1], ["EXPIRE", commands[0][1], "172800", "NX"]);
 });
 
-test("zero or absent cost is not a Redis call", async () => {
+test("zero, negative, or absent cost is not a Redis call", async () => {
   globalThis.fetch = (async () => {
     throw new Error("recordSpend called out for zero spend");
   }) as typeof fetch;
 
   await recordSpend(0);
   await recordSpend(NaN);
+  // The guard is `costUsd > 0`, not `costUsd !== 0` — a negative number (a refund, a
+  // bookkeeping bug upstream) must not decrement today's counter either.
+  await recordSpend(-5);
 });
 
 test("a bookkeeping failure is swallowed — the review already happened", async () => {

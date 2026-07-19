@@ -8,7 +8,14 @@ on:
 
 jobs:
   quality:
-    name: Lint & typecheck
+    # Renamed from "Lint & typecheck" — this job also builds, runs the unit suite, and
+    # runs the replayed eval suite, so the old name described a fraction of what it
+    # gates. A job's `name` is not only a label: GitHub branch protection's required
+    # status checks match on this string verbatim, so whoever administers this repo's
+    # branch protection needs to update the required check to the new name, or a
+    # protected branch will wait forever on a check that no longer reports under the
+    # old one.
+    name: Lint, typecheck, unit tests & evals
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -73,7 +73,10 @@ function insideParens(code: string, openParen: number): string | null {
 
 // Given the index of an opening `(`, returns the loop body that follows it: the
 // balanced `{…}` block, or — for a braceless single-statement loop — the rest of
-// that statement. Returns null if the source is unbalanced (truncated paste).
+// that statement. Returns null only when the `(…)` head never closes; a `{` that
+// never closes falls back to the rest of the source instead. A truncated paste then
+// errs toward inspecting too much rather than too little, which is the right
+// direction for a check that is only allowed to add specialists.
 function bodyAfter(code: string, openParen: number): string | null {
   const afterParen = skipBalanced(code, openParen, "(", ")");
   if (afterParen === null) return null;

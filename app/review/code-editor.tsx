@@ -1,6 +1,6 @@
 "use client";
 
-import CodeMirror from "@uiw/react-codemirror";
+import CodeMirror, { EditorView } from "@uiw/react-codemirror";
 import { javascript } from "@codemirror/lang-javascript";
 import { githubDark } from "@uiw/codemirror-theme-github";
 
@@ -10,6 +10,14 @@ import { githubDark } from "@uiw/codemirror-theme-github";
 // for a fraction of the bundle, and the line gutter is the part that matters:
 // findings are reported by line, so the user needs to see the numbers the model
 // saw.
+
+// An `aria-label` prop on the component lands on the wrapper div, where no screen
+// reader will ever look — the element a reader actually focuses is the contenteditable
+// `.cm-content` textbox inside. CodeMirror provides a facet for putting attributes on
+// exactly that element, so the label goes through it.
+const contentLabel = EditorView.contentAttributes.of({
+  "aria-label": "Code to review",
+});
 
 export default function CodeEditor({
   value,
@@ -26,7 +34,7 @@ export default function CodeEditor({
       onChange={onChange}
       editable={!disabled}
       theme={githubDark}
-      extensions={[javascript({ jsx: true, typescript: true })]}
+      extensions={[javascript({ jsx: true, typescript: true }), contentLabel]}
       height="420px"
       basicSetup={{
         lineNumbers: true,
@@ -34,7 +42,6 @@ export default function CodeEditor({
         highlightActiveLine: false,
         autocompletion: false,
       }}
-      aria-label="Code to review"
     />
   );
 }
