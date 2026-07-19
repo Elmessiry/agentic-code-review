@@ -24,9 +24,14 @@ import type { ReviewEvent } from "./schema";
 export type Emit = (event: ReviewEvent) => void;
 
 // What a review has been billed so far, read off its own event stream: the plan event
-// carries the planner's cost, the done event the full total, and a run that dies
-// between the two under-reports by the specialists' spend, because per-specialist
-// costs only ride on the final total.
+// carries the planner's cost, the done event the full total, and an error event
+// carries the total too — WHEN it has one — because the two stages that can fail
+// after money has already changed hands (the planner exhausting its retries, a
+// synthesis abandoned mid-flight) emit their own "error" with `costUsd` set to
+// exactly what was billed rather than letting the failure look free. An "error" with
+// no `costUsd` is the other kind: a route-level catch-all with no idea what, if
+// anything, ran before it — and for that one, keeping `previous` is the honest
+// answer, not guessing 0.
 //
 // This lives HERE, not in the route that needs it, because it is knowledge about which
 // events carry money — and that is this module's contract. A route that reached into
@@ -36,6 +41,7 @@ export type Emit = (event: ReviewEvent) => void;
 export function billedSoFar(event: ReviewEvent, previous: number): number {
   if (event.type === "plan") return event.plan.costUsd;
   if (event.type === "done") return event.cost.totalUsd;
+  if (event.type === "error" && event.costUsd !== undefined) return event.costUsd;
   return previous;
 }
 
@@ -46,7 +52,28 @@ export async function runReview(
 ): Promise<void> {
   const spec = modelFor("specialist");
 
-  const { plan: decision, usage: planUsage } = await plan(code, signal);
+  let decision: Awaited<ReturnType<typeof plan>>["plan"];
+  let planUsage: Awaited<ReturnType<typeof plan>>["usage"];
+
+  try {
+    ({ plan: decision, usage: planUsage } = await plan(code, signal));
+  } catch (error) {
+    // completeWithRetry (lib/openrouter.ts) turns every exhausted retry into an
+    // OpenRouterError carrying whatever the attempts were BILLED, planner included.
+    // Left unwrapped, that cost had no event to ride on: the "plan" event only
+    // fires on success, so a planner that dies after two paid retries reported to
+    // the route as a flat $0 — the one figure the spend ledger promises never to be.
+    // There is no plan to fan out over without this call, so the pipeline ends here,
+    // but it ends having said what it cost.
+    emit({
+      type: "error",
+      error: signal?.aborted
+        ? "The review was stopped before it finished."
+        : "The review could not be planned. Try again.",
+      costUsd: error instanceof OpenRouterError ? error.usage.costUsd : 0,
+    });
+    return;
+  }
 
   emit({
     type: "plan",
@@ -79,13 +106,29 @@ export async function runReview(
     signal,
   );
 
-  const synthesisUsd = await runSynthesis(
-    code,
-    decision.agents.length,
-    fan,
-    signal,
-    emit,
-  );
+  let synthesisUsd: number;
+
+  try {
+    synthesisUsd = await runSynthesis(code, decision.agents.length, fan, signal, emit);
+  } catch (error) {
+    // The one case runSynthesis refuses to paper over: the client disconnected, or
+    // the pipeline's own budget ran out, while synthesis was in flight — see the
+    // `signal?.aborted` rethrow inside it. By this point the plan and every
+    // specialist that ran are already paid for, and specialist spend has no event
+    // of its own: it only ever reaches the ledger folded into `fan.costUsd` on
+    // "done". An abandoned synthesis means "done" never fires, so without this
+    // catch the specialists' cost would disappear from the total at exactly the
+    // moment nobody is left to read it.
+    emit({
+      type: "error",
+      error: "The review was stopped before it finished.",
+      costUsd:
+        planUsage.costUsd +
+        fan.costUsd +
+        (error instanceof OpenRouterError ? error.usage.costUsd : 0),
+    });
+    return;
+  }
 
   const prefixTokens = approxTokens(code);
 

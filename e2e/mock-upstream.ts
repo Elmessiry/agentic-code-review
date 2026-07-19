@@ -2,6 +2,8 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { keyOf } from "../evals/cassette";
 import { CANONICAL_OPENROUTER_URL } from "../lib/openrouter";
+import { SPECIALIST_INSTRUCTIONS } from "../lib/prompts/specialists";
+import type { Specialist } from "../lib/pipeline/schema";
 
 // The upstream the e2e tests talk to instead of OpenRouter: the eval fixtures, served
 // over local HTTP.
@@ -22,6 +24,24 @@ const PORT = Number(process.env.MOCK_UPSTREAM_PORT ?? 8787);
 
 type Recorded = { status: number; body: string };
 
+// Lets one e2e test force a single specialist's call to fail for real, so the
+// pipeline's degraded-merge path (runSynthesis in lib/pipeline/review.ts, the branch
+// that runs when the synthesizer's own request no longer matches a fixture) has
+// something genuine to exercise instead of a hand-forged fixture.
+//
+// POST /__poison { "specialist": "security" } fails every request carrying that
+// specialist's brief with a 500 until cleared with POST /__poison {}. Matched on the
+// first line of SPECIALIST_INSTRUCTIONS rather than a hardcoded string, so this stays
+// correct if the prompt wording changes — it reads the same source of truth the real
+// request was built from. A 500 (not a 404) so it goes through the same retry budget
+// a real outage would: completeWithRetry retries 500s three times, and all three have
+// to fail for the specialist to actually die instead of succeeding on a retry.
+let poisonedMarker: string | null = null;
+
+function markerFor(specialist: Specialist): string {
+  return SPECIALIST_INSTRUCTIONS[specialist].split("\n")[0];
+}
+
 async function main(): Promise<void> {
   const calls: Record<string, Recorded> = JSON.parse(
     await readFile("evals/fixtures/calls.json", "utf8"),
@@ -32,6 +52,22 @@ async function main(): Promise<void> {
     req.setEncoding("utf8");
     req.on("data", (chunk: string) => (body += chunk));
     req.on("end", () => {
+      if (req.url === "/__poison") {
+        const { specialist } = body
+          ? (JSON.parse(body) as { specialist?: Specialist })
+          : {};
+        poisonedMarker = specialist ? markerFor(specialist) : null;
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+
+      if (poisonedMarker && body.includes(poisonedMarker)) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "poisoned for a test" }));
+        return;
+      }
+
       const hit = calls[keyOf(CANONICAL_OPENROUTER_URL, body)];
 
       if (!hit) {

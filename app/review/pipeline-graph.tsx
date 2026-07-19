@@ -32,6 +32,13 @@ const DOT: Record<NodeState, string> = {
   skipped: "bg-muted/40",
 };
 
+// Colour is how a sighted reader tells "running" from "failed", which leaves a screen
+// reader with six identical labels. The same word the colour encodes, in an sr-only
+// span — the pairing VerdictCard already does with its severity dots.
+function StateText({ state }: { state: NodeState }) {
+  return <span className="sr-only">, {state}</span>;
+}
+
 function StateDot({ state }: { state: NodeState }) {
   return (
     <span
@@ -62,6 +69,7 @@ function StageNode({
     >
       <StateDot state={state} />
       {label}
+      <StateText state={state} />
     </div>
   );
 }
@@ -75,6 +83,7 @@ function LaneNode({ lane }: { lane: Lane }) {
     >
       <StateDot state={lane.state} />
       {lane.label}
+      <StateText state={lane.state} />
       {lane.forced && (
         <span className="border-high/50 text-high rounded-sm border px-1 text-[9px] font-semibold tracking-wide uppercase">
           forced

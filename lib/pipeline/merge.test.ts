@@ -114,6 +114,20 @@ test("the verdict never rejects, and never approves a flagged line", () => {
     "approve",
   );
 
+  // Medium is not low, so the "approve only on low-or-nothing" rule already covers
+  // it — but it is worth pinning on its own: a single medium finding is a real place
+  // this could regress into a specific carve-out for "just one finding" that the
+  // low-severity case above would not catch.
+  assert.equal(
+    mergeDeterministically([
+      {
+        specialist: "readability",
+        findings: [finding("readability", { severity: "medium" })],
+      },
+    ]).verdict,
+    "changes_requested",
+  );
+
   assert.equal(
     mergeDeterministically([
       { specialist: "security", findings: [finding("security", { severity: "high" })] },

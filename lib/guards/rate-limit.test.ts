@@ -47,6 +47,13 @@ test("a request under the limit passes", async () => {
   assert.equal(outcome.ok, true);
 });
 
+test("the request exactly at the limit still passes — only strictly over rejects", async () => {
+  upstashReplies([10, 1, 3600]); // INCR, EXPIRE, TTL
+
+  const outcome = await checkRateLimit(requestFrom("203.0.113.7"));
+  assert.equal(outcome.ok, true);
+});
+
 test("the request past the limit is rejected with a Retry-After", async () => {
   upstashReplies([11, 0, 1200]);
 

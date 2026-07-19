@@ -228,7 +228,18 @@ export type ReviewEvent =
       degraded: boolean;
     }
   | { type: "done"; cost: ReviewCost; cache: CacheReport }
-  | { type: "error"; error: string };
+  | {
+      type: "error";
+      error: string;
+      // Set only when the pipeline itself billed something before it had to give up —
+      // a planner or synthesizer that exhausted its retries, or a synthesis abandoned
+      // mid-flight when the client disconnected. Absent (rather than 0) is how the route's
+      // generic catch-all — an error that reached it with no idea what, if anything, was
+      // billed — is told to leave the running total exactly where it was, instead of
+      // stamping over it with a number that looks precise but is not. See billedSoFar in
+      // lib/pipeline/review.ts.
+      costUsd?: number;
+    };
 
 export type ReviewCost = {
   planUsd: number;

@@ -12,6 +12,22 @@ import { expect, test } from "@playwright/test";
 const stage = (page: import("@playwright/test").Page, id: string) =>
   page.locator(`[data-stage="${id}"]`);
 
+// The mock upstream this suite talks to instead of OpenRouter (see e2e/mock-upstream.ts)
+// also answers a control endpoint that forces one specialist's call to fail, so the
+// failure path below is a real dead specialist rather than a fixture forged by hand.
+const MOCK_UPSTREAM = "http://localhost:8787";
+
+function poison(specialist: string): Promise<Response> {
+  return fetch(`${MOCK_UPSTREAM}/__poison`, {
+    method: "POST",
+    body: JSON.stringify({ specialist }),
+  });
+}
+
+function unpoison(): Promise<Response> {
+  return fetch(`${MOCK_UPSTREAM}/__poison`, { method: "POST", body: "{}" });
+}
+
 test("a review runs end to end: the graph advances, findings land, the cost is shown", async ({
   page,
 }) => {
@@ -45,8 +61,13 @@ test("a review runs end to end: the graph advances, findings land, the cost is s
 
   // The price of the review is on the page, in dollars — the argument this project
   // makes, made where a visitor can see it. (first(): the plan card prices the
-  // planner's own call too, and both are welcome.)
-  await expect(page.getByText(/^\$0\.\d+/).first()).toBeVisible();
+  // planner's own call too, and both are welcome.) The regex alone would also match
+  // $0.00000, so the number itself is parsed and checked for being real money.
+  const priceText = await page
+    .getByText(/^\$0\.\d+/)
+    .first()
+    .textContent();
+  expect(Number(priceText?.slice(1))).toBeGreaterThan(0);
 });
 
 test("clean code is approved, and the planner's restraint is visible", async ({
@@ -64,4 +85,47 @@ test("clean code is approved, and the planner's restraint is visible", async ({
   // The whole point of the clean case: fine code gets an approval, not an invented
   // defect. This is the anti-hallucination assertion, made through a browser.
   await expect(page.getByText("Approve", { exact: true })).toBeVisible();
+});
+
+test("a dead specialist does not take the review down: it fails visibly, and the merge fallback ships a verdict", async ({
+  page,
+}) => {
+  // The conflict case is the one with two specialists (security and performance) on
+  // the same line — poisoning one leaves the other to actually finish, which is what
+  // makes the rest of this test possible: a review where every specialist died never
+  // reaches synthesis at all (see runSynthesis's `fan.results.length === 0` guard in
+  // lib/pipeline/review.ts).
+  await poison("security");
+
+  try {
+    await page.goto("/");
+
+    await page.getByRole("button", { name: "Conflict", exact: true }).click();
+    await page.getByRole("button", { name: "Review", exact: true }).click();
+
+    // The specialist-failure state, on the page: the security lane settles on
+    // "failed" rather than sitting on "running" forever or vanishing.
+    await expect(page.locator('[data-lane="security"]')).toHaveAttribute(
+      "data-state",
+      "failed",
+      { timeout: 15_000 },
+    );
+
+    // The run still finishes. A dead specialist's brief also changes the synthesizer's
+    // own request (it now names a gap that the recording never saw), so that call
+    // misses its fixture too — which pushes the review down the SAME fallback the
+    // synthesizer's own death would: the deterministic merge in lib/pipeline/merge.ts.
+    await expect(stage(page, "done")).toHaveAttribute("data-state", "done", {
+      timeout: 30_000,
+    });
+
+    // The fallback says out loud that it is a fallback, rather than passing off a
+    // mechanical merge as a model's judgement.
+    await expect(page.getByText(/merged mechanically/i)).toBeVisible();
+
+    // And a verdict — degraded, but a verdict, not a blank page.
+    await expect(page.getByText(/Approve|Changes requested|Reject/)).toBeVisible();
+  } finally {
+    await unpoison();
+  }
 });

@@ -45,6 +45,11 @@ export async function POST(request: Request): Promise<Response> {
     const { text, usage } = await completeText({
       role: "synthesizer",
       messages: generalReviewMessages(input.code),
+      // Without this, a closed tab does not stop the upstream call: completeText has
+      // no way to know the caller left, so a retried request runs to completion and
+      // bills in full for an answer nobody will read. The pipeline route wires the
+      // same request signal through for the same reason.
+      signal: request.signal,
     });
 
     await recordSpend(usage.costUsd);
