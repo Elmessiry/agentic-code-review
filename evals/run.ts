@@ -24,6 +24,7 @@ import type { Case, FindingExpectation } from "./types";
 //   npm run eval -- --live             hit the real API
 //   npm run eval -- --record           hit the real API and save the responses as fixtures
 //   npm run eval -- --matrix=<role>    score every candidate model for one role, live
+//   npm run eval -- --case=<name,…>    run only the named cases
 
 const THRESHOLDS = {
   recall: 0.8,
@@ -208,7 +209,14 @@ function score(c: Case, t: Transcript) {
     checks.push({
       ok: t.verdict !== null && e.verdict.includes(t.verdict),
       label: `verdict is one of ${e.verdict.join(" / ")}`,
-      detail: `got: ${t.verdict ?? "none"}`,
+      // The severity mix, not just the verdict, because those two are the whole diagnosis
+      // when this check fails on clean code. `maxHigh` budgets high-severity findings and
+      // nothing budgets the rest, so a verdict that blocks a merge over findings that are
+      // all low is a model contradicting its own instructions ("low-severity findings are
+      // compatible with approval"), while one that blocks over mediums is a model making a
+      // judgement the prompt permits. Same red line, two different bugs, and printing only
+      // the verdict tells you which one it was: neither.
+      detail: `got: ${t.verdict ?? "none"} — from ${severityMix(t.findings)}`,
     });
   }
 
@@ -229,6 +237,17 @@ function score(c: Case, t: Transcript) {
   }
 
   return { checks, expected, recalled, falsePositives };
+}
+
+// "4 high, 2 low" — the counts that are non-zero, in severity order. Empty findings read as
+// "no findings" rather than an empty string, so the sentence around it still parses.
+function severityMix(findings: SynthesizedFinding[]): string {
+  const counts = SEVERITIES.map(
+    (s) => [s, findings.filter((f) => f.severity === s).length] as const,
+  ).filter(([, n]) => n > 0);
+
+  if (counts.length === 0) return "no findings";
+  return counts.map(([s, n]) => `${n} ${s}`).join(", ");
 }
 
 type Suite = {
@@ -277,7 +296,7 @@ async function runSuite(files: string[], report: boolean): Promise<Suite> {
       console.log(
         `${bad.length === 0 ? "PASS" : "FAIL"}  ${c.name.padEnd(17)}` +
           `${t.agents.join("+") || "no specialists"}` +
-          `  ${t.findings.length} findings  ${t.verdict ?? "-"}` +
+          `  ${t.findings.length} findings (${severityMix(t.findings)})  ${t.verdict ?? "-"}` +
           `${t.degraded ? " (merged without a model)" : ""}` +
           `  $${t.cost.totalUsd.toFixed(5)}  ${(ms / 1000).toFixed(1)}s`,
       );
@@ -364,6 +383,49 @@ async function matrix(role: Role, files: string[]): Promise<void> {
   );
 }
 
+// Narrows the suite to named cases: --case=clean, or --case=clean,routing.
+//
+// This exists because of what a live run costs and what nondeterminism demands of it. The
+// models are not deterministic, so a single red case does not distinguish a model that has
+// drifted from one that always flaked at some rate nobody measured — only repetition does,
+// and repetition means running that ONE case five or ten times. Without a filter that bills
+// for the whole suite each time, which is enough friction that the honest diagnosis gets
+// skipped in favour of a guess.
+//
+// An unknown name is fatal rather than a silent no-match: a typo that quietly ran an empty
+// suite would print "every case passed" and exit 0, which is the most expensive kind of
+// wrong answer this harness could give.
+function selectCases(files: string[], args: string[]): string[] {
+  const flag = args.find((a) => a.startsWith("--case="));
+  if (!flag) return files;
+
+  const wanted = flag
+    .slice("--case=".length)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  if (wanted.length === 0) {
+    console.error("--case needs at least one case name: --case=clean");
+    process.exit(1);
+  }
+
+  const known = new Set(files.map((f) => f.replace(/\.json$/, "")));
+  const unknown = wanted.filter((name) => !known.has(name));
+
+  if (unknown.length > 0) {
+    console.error(
+      `unknown case${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}\n` +
+        `known cases: ${[...known].join(", ")}`,
+    );
+    process.exit(1);
+  }
+
+  // Ordered by `files`, not by the order they were typed, so the suite runs in the same
+  // sequence however the flag is written.
+  return files.filter((f) => wanted.includes(f.replace(/\.json$/, "")));
+}
+
 function parseMatrixRole(args: string[]): Role | null {
   const flag = args.find((a) => a.startsWith("--matrix"));
   if (!flag) return null;
@@ -388,7 +450,8 @@ async function main() {
   // One source for which cases run, shared by the matrix sweep and the ordinary suite — so
   // the two can never disagree about what "the suite" is. readdir does no network, so it is
   // safe to run before the cassette below intercepts fetch.
-  const files = (await readdir("evals/cases")).filter((f) => f.endsWith(".json")).sort();
+  const all = (await readdir("evals/cases")).filter((f) => f.endsWith(".json")).sort();
+  const files = selectCases(all, args);
 
   if (matrixRole) {
     console.log(
