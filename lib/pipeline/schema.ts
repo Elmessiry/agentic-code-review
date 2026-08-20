@@ -127,11 +127,24 @@ export type Synthesis = {
 //
 // The property ORDER here is load-bearing, which is not something a JSON schema
 // usually gets to say. Models emit properties in the order the schema declares them,
-// and the arguments of a forced tool call stream back as raw JSON fragments — so
+// and the arguments of a forced tool call stream back as raw JSON fragments. Two
+// consequences, and `findings` is last because of both.
+//
 // `summary` first is what lets its prose be decoded out of the half-written object and
 // forwarded to the browser while the findings are still being written. Move it below
 // `findings` and the review still works, but the user watches a spinner until the
 // whole object lands. See streamTool() in lib/openrouter.ts.
+//
+// `verdict` second because a field declared after a long nested array is a field that
+// gets dropped. It was last, and the synthesizer intermittently closed its object without
+// ever writing it — at which point validVerdict fails closed to changes_requested and a
+// review of clean code blocks a merge over a defect nobody claimed. `required` is a strong
+// hint to a model, not a guarantee, so the schema has to put the short decisive field
+// where the model will still be paying attention.
+//
+// Both orderings cost the same thing: the model commits to prose and a verdict before
+// writing the findings that justify them. Affordable because synthesis re-ranks work it
+// was handed rather than discovering anything.
 export const SYNTHESIS_TOOL = {
   type: "function" as const,
   function: {
@@ -145,6 +158,12 @@ export const SYNTHESIS_TOOL = {
           type: "string",
           description:
             "Two to four sentences of plain prose, addressed to the author. Lead with what actually matters. If the specialists disagreed, say so and say how you settled it. No headings, no bullets, no restating the finding list.",
+        },
+        verdict: {
+          type: "string",
+          enum: [...VERDICTS],
+          description:
+            "approve: nothing here blocks a merge. Low-severity findings are compatible with approval. changes_requested: a real defect a reviewer would want fixed first. reject: exploitable, or broken in a way that makes the change unsalvageable as written.",
         },
         findings: {
           type: "array",
@@ -186,14 +205,8 @@ export const SYNTHESIS_TOOL = {
             additionalProperties: false,
           },
         },
-        verdict: {
-          type: "string",
-          enum: [...VERDICTS],
-          description:
-            "approve: nothing here blocks a merge. changes_requested: a real defect a reviewer would want fixed first. reject: exploitable, or broken in a way that makes the change unsalvageable as written.",
-        },
       },
-      required: ["summary", "findings", "verdict"],
+      required: ["summary", "verdict", "findings"],
       additionalProperties: false,
     },
   },
